@@ -1,0 +1,1106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NLI Span Labeler</title>
+    <style>
+        :root {
+            --bg-dark: #1a1a2e;
+            --bg-card: #16213e;
+            --text-primary: #eee;
+            --text-secondary: #aaa;
+            --accent: #4a9eff;
+            --success: #4ade80;
+            --warning: #fbbf24;
+            --danger: #f87171;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #333;
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            color: var(--accent);
+        }
+
+        .header-buttons {
+            display: flex;
+            gap: 10px;
+        }
+
+        .btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.2s;
+        }
+
+        .btn-primary { background: var(--accent); color: white; }
+        .btn-primary:hover { background: #3a8eef; }
+        .btn-success { background: var(--success); color: #1a1a2e; }
+        .btn-warning { background: var(--warning); color: #1a1a2e; }
+        .btn-danger { background: var(--danger); color: white; }
+        .btn-secondary { background: #444; color: white; }
+
+        .card {
+            background: var(--bg-card);
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        .example-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .example-id {
+            font-family: monospace;
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+        }
+
+        .gold-label {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .gold-label.entailment { background: #22c55e33; color: #4ade80; }
+        .gold-label.neutral { background: #eab30833; color: #fbbf24; }
+        .gold-label.contradiction { background: #ef444433; color: #f87171; }
+
+        .text-section {
+            margin-bottom: 20px;
+        }
+
+        .text-label {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+        }
+
+        .text-content {
+            line-height: 2.5;
+            font-size: 1.1rem;
+        }
+
+        /* Word container for multi-label support */
+        .word-container {
+            display: inline-block;
+            position: relative;
+            margin: 2px 4px;
+            vertical-align: top;
+        }
+
+        .word {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.15s;
+            border: 2px solid transparent;
+            position: relative;
+            z-index: 1;
+        }
+
+        .word:hover {
+            background: rgba(255, 255, 255, 0.15);
+        }
+
+        /* Label dots below words */
+        .label-dots {
+            display: flex;
+            justify-content: center;
+            gap: 2px;
+            margin-top: 2px;
+            min-height: 8px;
+        }
+
+        .label-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .label-dot.active-label {
+            width: 8px;
+            height: 8px;
+            box-shadow: 0 0 4px currentColor;
+        }
+
+        /* Active label highlight on word */
+        .word.has-active-label {
+            border-width: 2px;
+            border-style: solid;
+        }
+
+        /* Color classes */
+        .color-0 { background: rgba(59, 130, 246, 0.3); border-color: #3b82f6; color: #3b82f6; }
+        .color-1 { background: rgba(139, 92, 246, 0.3); border-color: #8b5cf6; color: #8b5cf6; }
+        .color-2 { background: rgba(6, 182, 212, 0.3); border-color: #06b6d4; color: #06b6d4; }
+        .color-3 { background: rgba(34, 197, 94, 0.3); border-color: #22c55e; color: #22c55e; }
+        .color-4 { background: rgba(234, 179, 8, 0.3); border-color: #eab308; color: #eab308; }
+        .color-5 { background: rgba(249, 115, 22, 0.3); border-color: #f97316; color: #f97316; }
+        .color-6 { background: rgba(74, 222, 128, 0.3); border-color: #4ade80; color: #4ade80; }
+        .color-7 { background: rgba(251, 191, 36, 0.3); border-color: #fbbf24; color: #fbbf24; }
+        .color-8 { background: rgba(248, 113, 113, 0.3); border-color: #f87171; color: #f87171; }
+
+        .labels-section { margin-top: 20px; }
+
+        .labels-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .labels-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 10px;
+        }
+
+        .label-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
+            cursor: pointer;
+            border: 2px solid transparent;
+            transition: all 0.2s;
+        }
+
+        .label-item:hover { background: rgba(0, 0, 0, 0.3); }
+
+        .label-item.active {
+            border-color: var(--accent);
+            background: rgba(74, 158, 255, 0.1);
+        }
+
+        .label-color {
+            width: 20px;
+            height: 20px;
+            border-radius: 4px;
+            flex-shrink: 0;
+        }
+
+        .label-name {
+            flex-grow: 1;
+            font-size: 0.9rem;
+        }
+
+        .label-name input {
+            background: transparent;
+            border: none;
+            color: var(--text-primary);
+            width: 100%;
+            font-size: 0.9rem;
+        }
+
+        .label-name input:focus {
+            outline: none;
+            border-bottom: 1px solid var(--accent);
+        }
+
+        .label-count {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            background: rgba(255, 255, 255, 0.1);
+            padding: 2px 8px;
+            border-radius: 10px;
+        }
+
+        .complexity-section { margin-top: 20px; }
+
+        .complexity-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 15px;
+        }
+
+        .complexity-item {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+
+        .complexity-label {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+
+        .complexity-input {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .complexity-input input[type="range"] {
+            flex-grow: 1;
+            height: 6px;
+            border-radius: 3px;
+            -webkit-appearance: none;
+            background: #333;
+        }
+
+        .complexity-input input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: var(--accent);
+            cursor: pointer;
+        }
+
+        .complexity-input input[type="number"] {
+            width: 60px;
+            padding: 4px 8px;
+            background: #1a1a2e;
+            border: 1px solid #444;
+            border-radius: 4px;
+            color: var(--text-primary);
+            font-size: 0.9rem;
+            text-align: center;
+        }
+
+        .complexity-input input[type="number"]:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
+        /* Hide number input spinners */
+        .complexity-input input[type="number"]::-webkit-outer-spin-button,
+        .complexity-input input[type="number"]::-webkit-inner-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+
+        .actions {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #333;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 15px;
+        }
+
+        .stat-card {
+            background: rgba(0, 0, 0, 0.2);
+            padding: 15px;
+            border-radius: 8px;
+        }
+
+        .stat-label {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            margin-bottom: 5px;
+        }
+
+        .stat-value {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: var(--accent);
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: var(--text-secondary);
+        }
+
+        .message {
+            text-align: center;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+
+        .message.success { background: rgba(34, 197, 94, 0.2); color: var(--success); }
+        .message.error { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
+
+        .nav-tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .nav-tab {
+            padding: 10px 20px;
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+        }
+
+        .nav-tab:hover { color: var(--text-primary); }
+        .nav-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+        .dataset-selector {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .dataset-selector select {
+            background: var(--bg-card);
+            color: var(--text-primary);
+            border: 1px solid #444;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 0.9rem;
+        }
+
+        .hidden { display: none !important; }
+
+        .instructions {
+            background: rgba(74, 158, 255, 0.1);
+            border-left: 3px solid var(--accent);
+            padding: 15px;
+            margin-bottom: 20px;
+            font-size: 0.9rem;
+            line-height: 1.6;
+        }
+
+        .instructions strong { color: var(--accent); }
+
+        /* Legend for label colors */
+        .legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #333;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+
+        .legend-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>NLI Span Labeler</h1>
+            <div class="header-buttons">
+                <button class="btn btn-secondary" onclick="showStats()">Stats</button>
+                <button class="btn btn-secondary" onclick="exportLabels()">Export</button>
+            </div>
+        </header>
+
+        <div class="nav-tabs">
+            <button class="nav-tab active" data-tab="labeler" onclick="switchTab('labeler')">Labeler</button>
+            <button class="nav-tab" data-tab="stats" onclick="switchTab('stats')">Statistics</button>
+            <button class="nav-tab" data-tab="lookup" onclick="switchTab('lookup')">Lookup</button>
+        </div>
+
+        <!-- Labeler Tab -->
+        <div id="labeler-tab" class="tab-content">
+            <div class="dataset-selector">
+                <label>Dataset:</label>
+                <select id="dataset-select" onchange="loadNextExample()">
+                    <option value="">Any</option>
+                </select>
+                <button class="btn btn-primary" onclick="loadNextExample()">Next Example</button>
+            </div>
+
+            <div class="instructions">
+                <strong>Instructions:</strong>
+                1. Click a label below to select it (highlighted border).
+                2. Click words in the premise/hypothesis to toggle them for that label.
+                3. Words show colored dots for all their labels; the active label's dot is larger.
+                4. Set complexity scores using sliders or type values directly (1-100).
+                5. Click "Save & Next" when done, or "Skip" to skip.
+            </div>
+
+            <div id="message-area"></div>
+
+            <div id="example-area" class="card">
+                <div class="loading">Loading example...</div>
+            </div>
+
+            <!-- Span Labels Section -->
+            <div class="card labels-section">
+                <div class="labels-header">
+                    <h3>Span Labels</h3>
+                    <button class="btn btn-secondary" onclick="addNewLabel()">+ New Label</button>
+                </div>
+                <div class="labels-grid" id="labels-grid"></div>
+                <div class="legend" id="legend"></div>
+            </div>
+
+            <!-- Complexity Scores Section -->
+            <div class="card complexity-section">
+                <h3 style="margin-bottom: 15px;">Complexity Scores (1-100)</h3>
+                <div class="complexity-grid" id="complexity-grid"></div>
+            </div>
+
+            <!-- Actions -->
+            <div class="actions">
+                <button class="btn btn-warning" onclick="skipExample()">Skip</button>
+                <div>
+                    <button class="btn btn-secondary" onclick="clearSelections()">Clear All</button>
+                    <button class="btn btn-success" onclick="saveAndNext()">Save & Next</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Stats Tab -->
+        <div id="stats-tab" class="tab-content hidden">
+            <div class="card">
+                <h3 style="margin-bottom: 20px;">Labeling Statistics</h3>
+                <div id="stats-content" class="stats-grid">
+                    <div class="loading">Loading stats...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Lookup Tab -->
+        <div id="lookup-tab" class="tab-content hidden">
+            <div class="card">
+                <h3 style="margin-bottom: 15px;">Lookup Example</h3>
+                <div style="display: flex; gap: 10px; margin-bottom: 20px;">
+                    <input type="text" id="lookup-dataset" placeholder="Dataset (e.g., snli)"
+                           style="flex: 1; padding: 10px; background: #1a1a2e; border: 1px solid #444; border-radius: 6px; color: #eee;">
+                    <input type="text" id="lookup-id" placeholder="Example ID"
+                           style="flex: 2; padding: 10px; background: #1a1a2e; border: 1px solid #444; border-radius: 6px; color: #eee;">
+                    <button class="btn btn-primary" onclick="lookupExample()">Lookup</button>
+                </div>
+                <div id="lookup-result"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // State
+        let currentExample = null;
+        let activeLabel = null;
+        let labels = [];
+
+        // Pre-defined labels with colors
+        const presetLabels = [
+            // Difficulty dimensions
+            { name: 'reasoning', color: '#3b82f6', colorIndex: 0 },
+            { name: 'creativity', color: '#8b5cf6', colorIndex: 1 },
+            { name: 'domain_knowledge', color: '#06b6d4', colorIndex: 2 },
+            { name: 'contextual', color: '#22c55e', colorIndex: 3 },
+            { name: 'constraints', color: '#eab308', colorIndex: 4 },
+            { name: 'ambiguity', color: '#f97316', colorIndex: 5 },
+            // NLI labels
+            { name: 'entailment', color: '#4ade80', colorIndex: 6 },
+            { name: 'neutral', color: '#fbbf24', colorIndex: 7 },
+            { name: 'contradiction', color: '#f87171', colorIndex: 8 },
+        ];
+
+        // Complexity dimensions
+        const complexityDimensions = [
+            { key: 'reasoning', label: 'Reasoning', description: 'Logical inference required' },
+            { key: 'creativity', label: 'Creativity', description: 'Imaginative interpretation' },
+            { key: 'domain_knowledge', label: 'Domain Knowledge', description: 'Specialized expertise' },
+            { key: 'contextual', label: 'Contextual', description: 'Implicit context dependence' },
+            { key: 'constraints', label: 'Constraints', description: 'Conditions to track' },
+            { key: 'ambiguity', label: 'Ambiguity', description: 'Answer debatability' },
+        ];
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', async () => {
+            await loadDatasets();
+            initLabels();
+            initComplexityInputs();
+            loadNextExample();
+        });
+
+        async function loadDatasets() {
+            try {
+                const resp = await fetch('/api/datasets');
+                const data = await resp.json();
+                const select = document.getElementById('dataset-select');
+                data.datasets.forEach(ds => {
+                    const option = document.createElement('option');
+                    option.value = ds;
+                    option.textContent = ds;
+                    select.appendChild(option);
+                });
+            } catch (e) {
+                console.error('Failed to load datasets:', e);
+            }
+        }
+
+        function initLabels() {
+            labels = presetLabels.map(p => ({
+                ...p,
+                spans: { premise: new Set(), hypothesis: new Set() }
+            }));
+            renderLabels();
+            renderLegend();
+        }
+
+        function initComplexityInputs() {
+            const grid = document.getElementById('complexity-grid');
+            grid.innerHTML = complexityDimensions.map(dim => `
+                <div class="complexity-item">
+                    <div class="complexity-label">${dim.label}</div>
+                    <div class="complexity-input">
+                        <input type="range" id="complexity-range-${dim.key}"
+                               min="1" max="100" value="50"
+                               oninput="syncComplexity('${dim.key}', this.value, 'range')">
+                        <input type="number" id="complexity-num-${dim.key}"
+                               min="1" max="100" value="50"
+                               oninput="syncComplexity('${dim.key}', this.value, 'num')">
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function syncComplexity(key, value, source) {
+            // Clamp value to valid range
+            value = Math.max(1, Math.min(100, parseInt(value) || 50));
+
+            const rangeInput = document.getElementById(`complexity-range-${key}`);
+            const numInput = document.getElementById(`complexity-num-${key}`);
+
+            if (source === 'range') {
+                numInput.value = value;
+            } else {
+                rangeInput.value = value;
+            }
+        }
+
+        function renderLabels() {
+            const grid = document.getElementById('labels-grid');
+            grid.innerHTML = labels.map((label, idx) => {
+                const totalSpans = label.spans.premise.size + label.spans.hypothesis.size;
+                const isActive = activeLabel === idx;
+                return `
+                    <div class="label-item ${isActive ? 'active' : ''}"
+                         onclick="selectLabel(${idx})"
+                         data-label-idx="${idx}">
+                        <div class="label-color" style="background: ${label.color}"></div>
+                        <div class="label-name">
+                            <input type="text" value="${label.name}"
+                                   onclick="event.stopPropagation()"
+                                   onchange="updateLabelName(${idx}, this.value)">
+                        </div>
+                        ${totalSpans > 0 ? `<span class="label-count">${totalSpans}</span>` : ''}
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderLegend() {
+            const legend = document.getElementById('legend');
+            legend.innerHTML = labels.map(l => `
+                <div class="legend-item">
+                    <div class="legend-dot" style="background: ${l.color}"></div>
+                    <span>${l.name}</span>
+                </div>
+            `).join('');
+        }
+
+        function selectLabel(idx) {
+            activeLabel = activeLabel === idx ? null : idx;
+            renderLabels();
+            updateWordHighlights();
+        }
+
+        function updateLabelName(idx, newName) {
+            labels[idx].name = newName;
+            renderLegend();
+        }
+
+        function addNewLabel() {
+            const colorIndex = labels.length % 9;
+            const colors = ['#3b82f6', '#8b5cf6', '#06b6d4', '#22c55e', '#eab308', '#f97316', '#4ade80', '#fbbf24', '#f87171'];
+            labels.push({
+                name: `custom_${labels.length + 1}`,
+                color: colors[colorIndex],
+                colorIndex: colorIndex,
+                spans: { premise: new Set(), hypothesis: new Set() }
+            });
+            renderLabels();
+            renderLegend();
+        }
+
+        async function loadNextExample() {
+            const dataset = document.getElementById('dataset-select').value;
+            const area = document.getElementById('example-area');
+            area.innerHTML = '<div class="loading">Loading example...</div>';
+
+            try {
+                const url = dataset ? `/api/next?dataset=${dataset}` : '/api/next';
+                const resp = await fetch(url);
+                const data = await resp.json();
+
+                if (data.complete) {
+                    area.innerHTML = `<div class="message success">${data.message}</div>`;
+                    currentExample = null;
+                    return;
+                }
+
+                currentExample = data;
+                resetLabelsForNewExample();
+                renderExample();
+            } catch (e) {
+                area.innerHTML = `<div class="message error">Error loading example: ${e.message}</div>`;
+            }
+        }
+
+        function resetLabelsForNewExample() {
+            labels.forEach(label => {
+                label.spans = { premise: new Set(), hypothesis: new Set() };
+            });
+            activeLabel = null;
+            renderLabels();
+
+            // Reset complexity scores to 50
+            complexityDimensions.forEach(dim => {
+                const rangeInput = document.getElementById(`complexity-range-${dim.key}`);
+                const numInput = document.getElementById(`complexity-num-${dim.key}`);
+                if (rangeInput) rangeInput.value = 50;
+                if (numInput) numInput.value = 50;
+            });
+        }
+
+        function renderExample() {
+            if (!currentExample) return;
+
+            const area = document.getElementById('example-area');
+            const goldLabelClass = currentExample.gold_label_text || 'neutral';
+
+            area.innerHTML = `
+                <div class="example-header">
+                    <span class="example-id">${currentExample.id}</span>
+                    <span class="gold-label ${goldLabelClass}">${currentExample.gold_label_text || 'unknown'}</span>
+                </div>
+                <div class="text-section">
+                    <div class="text-label">Premise</div>
+                    <div class="text-content" id="premise-text">
+                        ${renderWords(currentExample.premise_words, 'premise')}
+                    </div>
+                </div>
+                <div class="text-section">
+                    <div class="text-label">Hypothesis</div>
+                    <div class="text-content" id="hypothesis-text">
+                        ${renderWords(currentExample.hypothesis_words, 'hypothesis')}
+                    </div>
+                </div>
+            `;
+
+            // Load existing labels if any
+            if (currentExample.existing_labels && currentExample.existing_labels.length > 0) {
+                loadExistingLabels(currentExample.existing_labels);
+            }
+
+            // Load existing scores if any
+            if (currentExample.existing_scores) {
+                Object.entries(currentExample.existing_scores).forEach(([key, value]) => {
+                    if (value !== null) {
+                        const rangeInput = document.getElementById(`complexity-range-${key}`);
+                        const numInput = document.getElementById(`complexity-num-${key}`);
+                        if (rangeInput) rangeInput.value = value;
+                        if (numInput) numInput.value = value;
+                    }
+                });
+            }
+        }
+
+        function renderWords(words, source) {
+            return words.map(w => `
+                <span class="word-container">
+                    <span class="word"
+                          data-source="${source}"
+                          data-index="${w.index}"
+                          data-char-start="${w.char_start}"
+                          data-char-end="${w.char_end}"
+                          onclick="toggleWord('${source}', ${w.index})">${w.text}</span>
+                    <div class="label-dots" data-source="${source}" data-index="${w.index}"></div>
+                </span>
+            `).join('');
+        }
+
+        function loadExistingLabels(existingLabels) {
+            existingLabels.forEach(existing => {
+                let labelIdx = labels.findIndex(l => l.name === existing.label_name);
+                if (labelIdx === -1) {
+                    const colorIndex = labels.length % 9;
+                    const colors = ['#3b82f6', '#8b5cf6', '#06b6d4', '#22c55e', '#eab308', '#f97316', '#4ade80', '#fbbf24', '#f87171'];
+                    labels.push({
+                        name: existing.label_name,
+                        color: existing.label_color || colors[colorIndex],
+                        colorIndex: colorIndex,
+                        spans: { premise: new Set(), hypothesis: new Set() }
+                    });
+                    labelIdx = labels.length - 1;
+                }
+
+                existing.spans.forEach(span => {
+                    labels[labelIdx].spans[span.source].add(span.word_index);
+                });
+            });
+
+            renderLabels();
+            renderLegend();
+            updateWordHighlights();
+        }
+
+        function toggleWord(source, index) {
+            if (activeLabel === null) {
+                showMessage('Select a label first by clicking on it', 'error');
+                return;
+            }
+
+            const spans = labels[activeLabel].spans[source];
+            if (spans.has(index)) {
+                spans.delete(index);
+            } else {
+                spans.add(index);
+            }
+
+            renderLabels();
+            updateWordHighlights();
+        }
+
+        function updateWordHighlights() {
+            // Clear all word styles and dots
+            document.querySelectorAll('.word').forEach(el => {
+                el.className = 'word';
+            });
+            document.querySelectorAll('.label-dots').forEach(el => {
+                el.innerHTML = '';
+            });
+
+            // Build a map of word -> labels for each source
+            const wordLabels = { premise: {}, hypothesis: {} };
+
+            labels.forEach((label, labelIdx) => {
+                ['premise', 'hypothesis'].forEach(source => {
+                    label.spans[source].forEach(wordIdx => {
+                        if (!wordLabels[source][wordIdx]) {
+                            wordLabels[source][wordIdx] = [];
+                        }
+                        wordLabels[source][wordIdx].push({
+                            labelIdx,
+                            color: label.color,
+                            colorIndex: label.colorIndex
+                        });
+                    });
+                });
+            });
+
+            // Apply highlights and dots
+            ['premise', 'hypothesis'].forEach(source => {
+                Object.entries(wordLabels[source]).forEach(([wordIdx, labelList]) => {
+                    const wordEl = document.querySelector(
+                        `.word[data-source="${source}"][data-index="${wordIdx}"]`
+                    );
+                    const dotsEl = document.querySelector(
+                        `.label-dots[data-source="${source}"][data-index="${wordIdx}"]`
+                    );
+
+                    if (wordEl && dotsEl) {
+                        // Check if active label is in this word's labels
+                        const hasActiveLabel = labelList.some(l => l.labelIdx === activeLabel);
+
+                        if (hasActiveLabel && activeLabel !== null) {
+                            // Style word with active label's color
+                            const activeLabelInfo = labelList.find(l => l.labelIdx === activeLabel);
+                            wordEl.classList.add('has-active-label', `color-${activeLabelInfo.colorIndex}`);
+                        }
+
+                        // Create dots for all labels, with active label's dot larger
+                        // Sort so active label's dot is first (most visible)
+                        const sortedLabels = [...labelList].sort((a, b) => {
+                            if (a.labelIdx === activeLabel) return -1;
+                            if (b.labelIdx === activeLabel) return 1;
+                            return 0;
+                        });
+
+                        dotsEl.innerHTML = sortedLabels.map(l => `
+                            <div class="label-dot ${l.labelIdx === activeLabel ? 'active-label' : ''}"
+                                 style="background: ${l.color}; color: ${l.color};"
+                                 title="${labels[l.labelIdx].name}"></div>
+                        `).join('');
+                    }
+                });
+            });
+        }
+
+        function clearSelections() {
+            labels.forEach(label => {
+                label.spans = { premise: new Set(), hypothesis: new Set() };
+            });
+            activeLabel = null;
+            renderLabels();
+            updateWordHighlights();
+        }
+
+        async function saveAndNext() {
+            if (!currentExample) return;
+
+            const labelData = labels
+                .filter(l => l.spans.premise.size > 0 || l.spans.hypothesis.size > 0)
+                .map(l => ({
+                    label_name: l.name,
+                    label_color: l.color,
+                    spans: [
+                        ...Array.from(l.spans.premise).map(idx => {
+                            const wordData = currentExample.premise_words[idx];
+                            return {
+                                source: 'premise',
+                                word_index: idx,
+                                word_text: wordData.text,
+                                char_start: wordData.char_start,
+                                char_end: wordData.char_end
+                            };
+                        }),
+                        ...Array.from(l.spans.hypothesis).map(idx => {
+                            const wordData = currentExample.hypothesis_words[idx];
+                            return {
+                                source: 'hypothesis',
+                                word_index: idx,
+                                word_text: wordData.text,
+                                char_start: wordData.char_start,
+                                char_end: wordData.char_end
+                            };
+                        })
+                    ]
+                }));
+
+            const complexityScores = {};
+            complexityDimensions.forEach(dim => {
+                const numInput = document.getElementById(`complexity-num-${dim.key}`);
+                if (numInput) {
+                    complexityScores[dim.key] = parseInt(numInput.value) || 50;
+                }
+            });
+
+            try {
+                const resp = await fetch('/api/annotate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        example_id: currentExample.id,
+                        labels: labelData,
+                        complexity_scores: complexityScores
+                    })
+                });
+
+                if (resp.ok) {
+                    showMessage('Saved successfully!', 'success');
+                    loadNextExample();
+                } else {
+                    const err = await resp.json();
+                    showMessage(`Error: ${err.detail}`, 'error');
+                }
+            } catch (e) {
+                showMessage(`Error saving: ${e.message}`, 'error');
+            }
+        }
+
+        async function skipExample() {
+            if (!currentExample) return;
+            try {
+                await fetch(`/api/skip/${currentExample.id}`, { method: 'POST' });
+                showMessage('Skipped', 'success');
+                loadNextExample();
+            } catch (e) {
+                showMessage(`Error: ${e.message}`, 'error');
+            }
+        }
+
+        function showMessage(text, type) {
+            const area = document.getElementById('message-area');
+            area.innerHTML = `<div class="message ${type}">${text}</div>`;
+            setTimeout(() => { area.innerHTML = ''; }, 3000);
+        }
+
+        function switchTab(tabName) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+            document.querySelectorAll('.nav-tab').forEach(el => el.classList.remove('active'));
+            document.getElementById(`${tabName}-tab`).classList.remove('hidden');
+            document.querySelector(`.nav-tab[data-tab="${tabName}"]`).classList.add('active');
+            if (tabName === 'stats') loadStats();
+        }
+
+        async function loadStats() {
+            const content = document.getElementById('stats-content');
+            content.innerHTML = '<div class="loading">Loading stats...</div>';
+
+            try {
+                const resp = await fetch('/api/stats');
+                const stats = await resp.json();
+
+                let html = `
+                    <div class="stat-card">
+                        <div class="stat-label">Total Labeled</div>
+                        <div class="stat-value">${stats.total_labeled}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Total Spans</div>
+                        <div class="stat-value">${stats.spans.total_spans}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Examples with Spans</div>
+                        <div class="stat-value">${stats.spans.examples_with_spans}</div>
+                    </div>
+                `;
+
+                Object.entries(stats.datasets).forEach(([ds, info]) => {
+                    const labeled = stats.labeled[ds] || 0;
+                    const skipped = stats.skipped[ds] || 0;
+                    html += `
+                        <div class="stat-card">
+                            <div class="stat-label">${ds}</div>
+                            <div class="stat-value">${labeled}/${info.total}</div>
+                            <div style="font-size: 0.8rem; color: #aaa;">${skipped} skipped</div>
+                        </div>
+                    `;
+                });
+
+                if (stats.complexity_averages) {
+                    html += '<div style="grid-column: 1 / -1; margin-top: 20px;"><h4>Average Complexity Scores</h4></div>';
+                    Object.entries(stats.complexity_averages).forEach(([key, val]) => {
+                        if (val !== null) {
+                            html += `
+                                <div class="stat-card">
+                                    <div class="stat-label">${key}</div>
+                                    <div class="stat-value">${val.toFixed(1)}</div>
+                                </div>
+                            `;
+                        }
+                    });
+                }
+
+                if (Object.keys(stats.label_distribution).length > 0) {
+                    html += '<div style="grid-column: 1 / -1; margin-top: 20px;"><h4>Label Distribution</h4></div>';
+                    Object.entries(stats.label_distribution).forEach(([name, count]) => {
+                        html += `
+                            <div class="stat-card">
+                                <div class="stat-label">${name}</div>
+                                <div class="stat-value">${count}</div>
+                            </div>
+                        `;
+                    });
+                }
+
+                content.innerHTML = html;
+            } catch (e) {
+                content.innerHTML = `<div class="message error">Error loading stats: ${e.message}</div>`;
+            }
+        }
+
+        async function lookupExample() {
+            const dataset = document.getElementById('lookup-dataset').value.trim();
+            const id = document.getElementById('lookup-id').value.trim();
+            const resultArea = document.getElementById('lookup-result');
+
+            if (!id) {
+                resultArea.innerHTML = '<div class="message error">Please enter an example ID</div>';
+                return;
+            }
+
+            try {
+                const url = dataset ? `/api/example/${dataset}/${id}` : `/api/example/unknown/${id}`;
+                const resp = await fetch(url);
+
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    resultArea.innerHTML = `<div class="message error">${err.detail}</div>`;
+                    return;
+                }
+
+                const data = await resp.json();
+                currentExample = data;
+                switchTab('labeler');
+                resetLabelsForNewExample();
+                renderExample();
+
+                if (data.existing_labels && data.existing_labels.length > 0) {
+                    loadExistingLabels(data.existing_labels);
+                }
+            } catch (e) {
+                resultArea.innerHTML = `<div class="message error">Error: ${e.message}</div>`;
+            }
+        }
+
+        async function exportLabels() {
+            try {
+                const resp = await fetch('/api/export');
+                const data = await resp.json();
+
+                const blob = new Blob(
+                    [data.data.map(d => JSON.stringify(d)).join('\n')],
+                    { type: 'application/jsonl' }
+                );
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `nli_span_labels_${new Date().toISOString().split('T')[0]}.jsonl`;
+                a.click();
+                URL.revokeObjectURL(url);
+
+                showMessage(`Exported ${data.count} labeled examples`, 'success');
+            } catch (e) {
+                showMessage(`Export error: ${e.message}`, 'error');
+            }
+        }
+
+        function showStats() { switchTab('stats'); }
+    </script>
+</body>
+</html>
