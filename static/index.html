@@ -571,6 +571,8 @@
             justify-content: center;
             align-items: center;
             z-index: 1000;
+            overflow-y: auto;
+            padding: 20px;
         }
 
         .modal {
@@ -583,7 +585,12 @@
         }
 
         .modal.modal-wide {
-            max-width: 600px;
+            max-width: 700px;
+        }
+
+        .modal.modal-tall {
+            max-height: 85vh;
+            overflow-y: auto;
         }
 
         .modal h2 {
@@ -663,7 +670,7 @@
             border-top: 1px solid #333;
         }
 
-        /* Keyboard shortcuts help modal */
+        /* Help modal styles */
         .shortcuts-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -724,6 +731,111 @@
         .modal-relative {
             position: relative;
         }
+
+        /* Help content styles */
+        .help-content {
+            font-size: 0.9rem;
+            line-height: 1.7;
+        }
+
+        .help-content h3 {
+            color: var(--accent);
+            margin: 20px 0 10px 0;
+            font-size: 1rem;
+        }
+
+        .help-content h3:first-child {
+            margin-top: 0;
+        }
+
+        .help-content p {
+            margin-bottom: 12px;
+            color: var(--text-secondary);
+        }
+
+        .help-content ul, .help-content ol {
+            margin-left: 20px;
+            margin-bottom: 12px;
+            color: var(--text-secondary);
+        }
+
+        .help-content li {
+            margin-bottom: 6px;
+        }
+
+        .help-content strong {
+            color: var(--text-primary);
+        }
+
+        .help-content code {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.85em;
+        }
+
+        .help-content .tip {
+            background: rgba(74, 158, 255, 0.1);
+            border-left: 3px solid var(--accent);
+            padding: 10px 15px;
+            margin: 15px 0;
+            border-radius: 0 6px 6px 0;
+        }
+
+        .help-content .label-example {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: rgba(0, 0, 0, 0.2);
+            padding: 4px 10px;
+            border-radius: 6px;
+            margin: 2px;
+        }
+
+        .help-content .label-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 3px;
+        }
+
+        .help-content .nli-label {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            margin: 2px;
+        }
+
+        .help-content .nli-label.entailment { background: #22c55e33; color: #4ade80; }
+        .help-content .nli-label.neutral { background: #eab30833; color: #fbbf24; }
+        .help-content .nli-label.contradiction { background: #ef444433; color: #f87171; }
+
+        .help-content .api-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(74, 158, 255, 0.15);
+            color: var(--accent);
+            padding: 8px 16px;
+            border-radius: 6px;
+            text-decoration: none;
+            margin: 5px 5px 5px 0;
+            transition: background 0.2s;
+        }
+
+        .help-content .api-link:hover {
+            background: rgba(74, 158, 255, 0.25);
+        }
+
+        .help-tab-content {
+            display: none;
+        }
+
+        .help-tab-content.active {
+            display: block;
+        }
     </style>
 </head>
 <body>
@@ -778,73 +890,258 @@
         </div>
     </div>
 
-    <!-- Keyboard Shortcuts Help Modal -->
+    <!-- Help Modal -->
     <div id="help-modal" class="modal-overlay hidden">
-        <div class="modal modal-wide modal-relative">
+        <div class="modal modal-wide modal-tall modal-relative">
             <button class="modal-close" onclick="hideHelpModal()">&times;</button>
-            <h2>⌨️ Keyboard Shortcuts</h2>
-            <div class="shortcuts-grid">
-                <div class="shortcuts-section">
-                    <h4>Navigation</h4>
-                    <div class="shortcut-row">
-                        <span class="shortcut-keys"><span class="shortcut-key">j</span> <span class="shortcut-key">→</span></span>
-                        <span class="shortcut-desc">Next word</span>
+            <h2>📖 Help & Documentation</h2>
+            
+            <div class="modal-tabs" id="help-tabs">
+                <button class="modal-tab active" onclick="switchHelpTab('overview')">Overview</button>
+                <button class="modal-tab" onclick="switchHelpTab('labels')">Labels</button>
+                <button class="modal-tab" onclick="switchHelpTab('shortcuts')">Shortcuts</button>
+                <button class="modal-tab" onclick="switchHelpTab('api')">API</button>
+            </div>
+
+            <!-- Overview Tab -->
+            <div id="help-overview" class="help-tab-content active">
+                <div class="help-content">
+                    <h3>What is NLI?</h3>
+                    <p>
+                        <strong>Natural Language Inference (NLI)</strong> is a task where you determine the logical relationship 
+                        between two sentences: a <strong>premise</strong> and a <strong>hypothesis</strong>.
+                    </p>
+                    <p>The three possible relationships are:</p>
+                    <ul>
+                        <li><span class="nli-label entailment">Entailment</span> - The hypothesis is definitely true given the premise</li>
+                        <li><span class="nli-label neutral">Neutral</span> - The hypothesis might be true, but we can't tell from the premise</li>
+                        <li><span class="nli-label contradiction">Contradiction</span> - The hypothesis is definitely false given the premise</li>
+                    </ul>
+
+                    <h3>Your Task</h3>
+                    <p>
+                        As an annotator, you'll do two things for each example:
+                    </p>
+                    <ol>
+                        <li><strong>Mark relevant spans</strong> - Click on tokens (words) that are important for understanding the NLI relationship</li>
+                        <li><strong>Rate complexity</strong> - Score how difficult the example is across six dimensions</li>
+                    </ol>
+
+                    <h3>Annotation Workflow</h3>
+                    <ol>
+                        <li><strong>Read the example</strong> - Understand the premise and hypothesis</li>
+                        <li><strong>Select a label</strong> - Click a label or press <code>1-9</code> to choose what you're marking</li>
+                        <li><strong>Mark tokens</strong> - Click tokens or use <code>j/k</code> + <code>Space</code> to select them</li>
+                        <li><strong>Adjust complexity scores</strong> - Use the sliders to rate difficulty</li>
+                        <li><strong>Save</strong> - Press <code>Enter</code> or click "Save & Next"</li>
+                    </ol>
+
+                    <div class="tip">
+                        <strong>Tip:</strong> You can mark the same token with multiple labels! Colored dots below each token 
+                        show all labels applied to it.
                     </div>
-                    <div class="shortcut-row">
-                        <span class="shortcut-keys"><span class="shortcut-key">k</span> <span class="shortcut-key">←</span></span>
-                        <span class="shortcut-desc">Previous word</span>
-                    </div>
-                    <div class="shortcut-row">
-                        <span class="shortcut-keys"><span class="shortcut-key">Tab</span></span>
-                        <span class="shortcut-desc">Switch premise/hypothesis</span>
-                    </div>
-                    <div class="shortcut-row">
-                        <span class="shortcut-keys"><span class="shortcut-key">Home</span></span>
-                        <span class="shortcut-desc">First word</span>
-                    </div>
-                    <div class="shortcut-row">
-                        <span class="shortcut-keys"><span class="shortcut-key">End</span></span>
-                        <span class="shortcut-desc">Last word</span>
-                    </div>
+
+                    <h3>Tokenization</h3>
+                    <p>
+                        Text is split using <strong>WordPiece tokenization</strong> (the same as ModernBERT). 
+                        Sometimes words are split into subword tokens, shown connected with a small dash.
+                        For example, "running" might become "run" + "##ning".
+                    </p>
                 </div>
-                <div class="shortcuts-section">
-                    <h4>Labeling</h4>
-                    <div class="shortcut-row">
-                        <span class="shortcut-keys"><span class="shortcut-key">1</span>-<span class="shortcut-key">9</span></span>
-                        <span class="shortcut-desc">Toggle label on focused word</span>
-                    </div>
-                    <div class="shortcut-row">
-                        <span class="shortcut-keys"><span class="shortcut-key">Space</span></span>
-                        <span class="shortcut-desc">Toggle active label on word</span>
-                    </div>
-                    <div class="shortcut-row">
-                        <span class="shortcut-keys"><span class="shortcut-key">c</span></span>
-                        <span class="shortcut-desc">Clear all selections</span>
-                    </div>
-                </div>
-                <div class="shortcuts-section">
-                    <h4>Actions</h4>
-                    <div class="shortcut-row">
-                        <span class="shortcut-keys"><span class="shortcut-key">Enter</span></span>
-                        <span class="shortcut-desc">Save & next example</span>
-                    </div>
-                    <div class="shortcut-row">
-                        <span class="shortcut-keys"><span class="shortcut-key">Esc</span></span>
-                        <span class="shortcut-desc">Skip example</span>
-                    </div>
-                    <div class="shortcut-row">
-                        <span class="shortcut-keys"><span class="shortcut-key">n</span></span>
-                        <span class="shortcut-desc">Load next example</span>
-                    </div>
-                </div>
-                <div class="shortcuts-section">
-                    <h4>Help</h4>
-                    <div class="shortcut-row">
-                        <span class="shortcut-keys"><span class="shortcut-key">?</span></span>
-                        <span class="shortcut-desc">Toggle this help</span>
+            </div>
+
+            <!-- Labels Tab -->
+            <div id="help-labels" class="help-tab-content">
+                <div class="help-content">
+                    <h3>Difficulty Dimension Labels</h3>
+                    <p>Use these labels to mark tokens that contribute to different types of difficulty:</p>
+                    
+                    <p>
+                        <span class="label-example"><span class="label-dot" style="background: #3b82f6;"></span> reasoning</span>
+                        Tokens requiring logical inference, deduction, or multi-step reasoning to understand.
+                    </p>
+                    <p>
+                        <span class="label-example"><span class="label-dot" style="background: #8b5cf6;"></span> creativity</span>
+                        Tokens requiring imaginative or non-literal interpretation (metaphors, analogies, figurative language).
+                    </p>
+                    <p>
+                        <span class="label-example"><span class="label-dot" style="background: #06b6d4;"></span> domain_knowledge</span>
+                        Tokens requiring specialized knowledge (scientific, technical, cultural, etc.).
+                    </p>
+                    <p>
+                        <span class="label-example"><span class="label-dot" style="background: #22c55e;"></span> contextual</span>
+                        Tokens that depend on implicit context not explicitly stated in the text.
+                    </p>
+                    <p>
+                        <span class="label-example"><span class="label-dot" style="background: #eab308;"></span> constraints</span>
+                        Tokens representing conditions, limitations, or requirements that must be tracked.
+                    </p>
+                    <p>
+                        <span class="label-example"><span class="label-dot" style="background: #f97316;"></span> ambiguity</span>
+                        Tokens that are ambiguous or could be interpreted multiple ways.
+                    </p>
+
+                    <h3>NLI Relationship Labels</h3>
+                    <p>Use these labels to mark tokens that are key evidence for the NLI relationship:</p>
+                    
+                    <p>
+                        <span class="label-example"><span class="label-dot" style="background: #4ade80;"></span> entailment</span>
+                        Tokens that support or prove the hypothesis follows from the premise.
+                    </p>
+                    <p>
+                        <span class="label-example"><span class="label-dot" style="background: #fbbf24;"></span> neutral</span>
+                        Tokens that introduce information not determinable from the premise.
+                    </p>
+                    <p>
+                        <span class="label-example"><span class="label-dot" style="background: #f87171;"></span> contradiction</span>
+                        Tokens that conflict or are inconsistent between premise and hypothesis.
+                    </p>
+
+                    <h3>Custom Labels</h3>
+                    <p>
+                        Click <strong>"+ New Label"</strong> to create custom labels for patterns you want to track.
+                        You can rename any label by clicking on its name.
+                    </p>
+
+                    <h3>Complexity Scores</h3>
+                    <p>
+                        Rate each example on a scale of <strong>1-100</strong> for six dimensions:
+                    </p>
+                    <ul>
+                        <li><strong>Reasoning</strong> - How much logical inference is required?</li>
+                        <li><strong>Creativity</strong> - How much imaginative interpretation is needed?</li>
+                        <li><strong>Domain Knowledge</strong> - How much specialized knowledge is required?</li>
+                        <li><strong>Contextual</strong> - How much does it depend on implicit context?</li>
+                        <li><strong>Constraints</strong> - How many conditions must be tracked?</li>
+                        <li><strong>Ambiguity</strong> - How debatable is the answer?</li>
+                    </ul>
+
+                    <div class="tip">
+                        <strong>Tip:</strong> Don't overthink the scores! Quick intuitive ratings are fine. 
+                        The goal is relative difficulty, not precise measurement.
                     </div>
                 </div>
             </div>
+
+            <!-- Shortcuts Tab -->
+            <div id="help-shortcuts" class="help-tab-content">
+                <div class="help-content">
+                    <div class="shortcuts-grid">
+                        <div class="shortcuts-section">
+                            <h4>Navigation</h4>
+                            <div class="shortcut-row">
+                                <span class="shortcut-keys"><span class="shortcut-key">j</span> <span class="shortcut-key">→</span></span>
+                                <span class="shortcut-desc">Next word</span>
+                            </div>
+                            <div class="shortcut-row">
+                                <span class="shortcut-keys"><span class="shortcut-key">k</span> <span class="shortcut-key">←</span></span>
+                                <span class="shortcut-desc">Previous word</span>
+                            </div>
+                            <div class="shortcut-row">
+                                <span class="shortcut-keys"><span class="shortcut-key">Tab</span></span>
+                                <span class="shortcut-desc">Switch premise/hypothesis</span>
+                            </div>
+                            <div class="shortcut-row">
+                                <span class="shortcut-keys"><span class="shortcut-key">Home</span></span>
+                                <span class="shortcut-desc">First word</span>
+                            </div>
+                            <div class="shortcut-row">
+                                <span class="shortcut-keys"><span class="shortcut-key">End</span></span>
+                                <span class="shortcut-desc">Last word</span>
+                            </div>
+                        </div>
+                        <div class="shortcuts-section">
+                            <h4>Labeling</h4>
+                            <div class="shortcut-row">
+                                <span class="shortcut-keys"><span class="shortcut-key">1</span>-<span class="shortcut-key">9</span></span>
+                                <span class="shortcut-desc">Toggle label on focused word</span>
+                            </div>
+                            <div class="shortcut-row">
+                                <span class="shortcut-keys"><span class="shortcut-key">Space</span></span>
+                                <span class="shortcut-desc">Toggle active label on word</span>
+                            </div>
+                            <div class="shortcut-row">
+                                <span class="shortcut-keys"><span class="shortcut-key">c</span></span>
+                                <span class="shortcut-desc">Clear all selections</span>
+                            </div>
+                        </div>
+                        <div class="shortcuts-section">
+                            <h4>Actions</h4>
+                            <div class="shortcut-row">
+                                <span class="shortcut-keys"><span class="shortcut-key">Enter</span></span>
+                                <span class="shortcut-desc">Save & next example</span>
+                            </div>
+                            <div class="shortcut-row">
+                                <span class="shortcut-keys"><span class="shortcut-key">Esc</span></span>
+                                <span class="shortcut-desc">Skip example</span>
+                            </div>
+                            <div class="shortcut-row">
+                                <span class="shortcut-keys"><span class="shortcut-key">n</span></span>
+                                <span class="shortcut-desc">Load next example</span>
+                            </div>
+                        </div>
+                        <div class="shortcuts-section">
+                            <h4>Help</h4>
+                            <div class="shortcut-row">
+                                <span class="shortcut-keys"><span class="shortcut-key">?</span></span>
+                                <span class="shortcut-desc">Toggle this help</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tip" style="margin-top: 20px;">
+                        <strong>Power User Workflow:</strong> Press <code>1</code> to select "reasoning", 
+                        use <code>j/k</code> to navigate, <code>Space</code> to mark, then <code>Enter</code> to save.
+                        You can annotate without touching the mouse!
+                    </div>
+                </div>
+            </div>
+
+            <!-- API Tab -->
+            <div id="help-api" class="help-tab-content">
+                <div class="help-content">
+                    <h3>API Documentation</h3>
+                    <p>
+                        For programmatic access to the annotation data, the API is fully documented with interactive endpoints:
+                    </p>
+                    
+                    <p>
+                        <a href="/docs" target="_blank" class="api-link">📘 Swagger UI (/docs)</a>
+                        <a href="/redoc" target="_blank" class="api-link">📕 ReDoc (/redoc)</a>
+                    </p>
+
+                    <h3>Key Endpoints</h3>
+                    <ul>
+                        <li><code>GET /api/next</code> - Get the next unlabeled example</li>
+                        <li><code>GET /api/example/{dataset}/{id}</code> - Get a specific example</li>
+                        <li><code>POST /api/annotate</code> - Submit annotations</li>
+                        <li><code>GET /api/stats</code> - Get annotation statistics</li>
+                        <li><code>GET /api/export</code> - Export all annotations as JSONL</li>
+                    </ul>
+
+                    <h3>Authentication</h3>
+                    <p>
+                        The API uses session-based authentication via cookies. Log in through the web interface 
+                        or use the <code>/api/auth/login</code> endpoint.
+                    </p>
+                    <p>
+                        If the server is running with <code>ANONYMOUS_MODE=1</code>, no authentication is required.
+                    </p>
+
+                    <h3>Export Format</h3>
+                    <p>
+                        Exported data is in JSONL format with each line containing:
+                    </p>
+                    <ul>
+                        <li>Example ID, dataset, premise, hypothesis, gold label</li>
+                        <li>Annotator information</li>
+                        <li>Complexity scores for all six dimensions</li>
+                        <li>Span labels with token indices and character offsets</li>
+                        <li>Tokenizer model used</li>
+                    </ul>
+                </div>
+            </div>
+
             <p style="text-align: center; margin-top: 20px; color: var(--text-secondary); font-size: 0.85rem;">
                 Press <span class="shortcut-key">?</span> or <span class="shortcut-key">Esc</span> to close
             </p>
@@ -860,7 +1157,7 @@
                     <span class="username" id="username-display"></span>
                     <button class="logout-btn" onclick="handleLogout()" title="Logout">✕</button>
                 </span>
-                <button class="help-btn" onclick="showHelpModal()" title="Keyboard shortcuts (?)">?</button>
+                <button class="help-btn" onclick="showHelpModal()" title="Help & documentation (?)">?</button>
                 <button class="btn btn-secondary" onclick="showStats()">Stats</button>
                 <button class="btn btn-secondary" onclick="exportLabels()">Export</button>
             </div>
@@ -1040,8 +1337,8 @@
         }
 
         function switchAuthTab(tab) {
-            document.querySelectorAll('.modal-tab').forEach(t => t.classList.remove('active'));
-            document.querySelector(`.modal-tab:${tab === 'login' ? 'first-child' : 'last-child'}`).classList.add('active');
+            document.querySelectorAll('#auth-modal .modal-tab').forEach(t => t.classList.remove('active'));
+            document.querySelector(`#auth-modal .modal-tab:${tab === 'login' ? 'first-child' : 'last-child'}`).classList.add('active');
             
             document.getElementById('login-form').classList.toggle('hidden', tab !== 'login');
             document.getElementById('register-form').classList.toggle('hidden', tab !== 'register');
@@ -1178,6 +1475,20 @@
             } else {
                 hideHelpModal();
             }
+        }
+
+        function switchHelpTab(tabName) {
+            // Update tab buttons
+            document.querySelectorAll('#help-tabs .modal-tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            event.target.classList.add('active');
+
+            // Update tab content
+            document.querySelectorAll('.help-tab-content').forEach(content => {
+                content.classList.remove('active');
+            });
+            document.getElementById(`help-${tabName}`).classList.add('active');
         }
 
         // ============================================================================
