@@ -14,6 +14,7 @@ Features:
 - Multi-user support with session-based authentication
 - Annotator tracking for all labels and scores
 - Label schema enforcement with custom label tracking
+- Example locking for concurrent multi-user annotation
 
 Usage:
     cd nli-span-labeler
@@ -23,6 +24,7 @@ Usage:
 Environment Variables:
     ANONYMOUS_MODE=1  - Disable auth, use anonymous user (for local single-user)
     TOKENIZER_MODEL=answerdotai/ModernBERT-base  - HuggingFace model for tokenizer
+    LOCK_TIMEOUT_MINUTES=30  - How long example locks last (default: 30)
 """
 
 import json
@@ -57,6 +59,7 @@ SESSION_EXPIRY_DAYS = 30
 ANONYMOUS_USER_ID = 1
 LEGACY_USER_ID = 2
 TOKENIZER_MODEL = os.environ.get("TOKENIZER_MODEL", "answerdotai/ModernBERT-base")
+LOCK_TIMEOUT_MINUTES = int(os.environ.get("LOCK_TIMEOUT_MINUTES", "30"))
 
 # ============================================================================
 # Label Schema Configuration
@@ -129,6 +132,7 @@ A multi-user annotation tool for Natural Language Inference (NLI) examples with 
 - **Multi-user support**: Session-based authentication with per-user annotation tracking
 - **WordPiece tokenization**: Uses ModernBERT tokenizer for model-aligned annotations
 - **Label schema enforcement**: System labels tracked separately from custom labels
+- **Concurrent annotation**: Example locking prevents duplicate work
 
 ## Authentication
 
@@ -136,6 +140,12 @@ Most endpoints require authentication via session cookie. Use the `/api/auth/log
 `/api/auth/register` endpoints to obtain a session.
 
 Set `ANONYMOUS_MODE=1` environment variable to disable authentication for local single-user usage.
+
+## Example Locking
+
+When you request an example via `/api/next`, it's automatically locked to you for 30 minutes.
+Other users won't receive the same example. Locks are released when you save or skip, or
+you can explicitly release via `/api/lock/release/{example_id}`.
 
 ## Label Schema
 
@@ -167,6 +177,10 @@ TAGS_METADATA = [
         "description": "Submit span labels and complexity scores for examples.",
     },
     {
+        "name": "Locking",
+        "description": "Manage example locks for concurrent annotation.",
+    },
+    {
         "name": "Statistics",
         "description": "View annotation statistics, export data, and manage annotators.",
     },
@@ -179,7 +193,7 @@ TAGS_METADATA = [
 app = FastAPI(
     title="NLI Span Labeler API",
     description=API_DESCRIPTION,
-    version="1.0.0",
+    version="1.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_tags=TAGS_METADATA,
@@ -327,6 +341,21 @@ def init_db():
             );
 
             CREATE INDEX IF NOT EXISTS idx_examples_dataset ON examples(dataset);
+        """)
+
+        # Create example_locks table for concurrency handling
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS example_locks (
+                example_id TEXT PRIMARY KEY,
+                locked_by INTEGER NOT NULL,
+                locked_until TIMESTAMP NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (example_id) REFERENCES examples(id) ON DELETE CASCADE,
+                FOREIGN KEY (locked_by) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_locks_user ON example_locks(locked_by);
+            CREATE INDEX IF NOT EXISTS idx_locks_until ON example_locks(locked_until);
         """)
 
         # Handle migration for existing tables
@@ -527,6 +556,103 @@ def get_db():
 
 
 # ============================================================================
+# Locking Helpers
+# ============================================================================
+
+def acquire_lock(conn, example_id: str, user_id: int) -> Optional[datetime]:
+    """
+    Acquire a lock on an example for a user.
+    
+    Returns the lock expiry time if successful, None if already locked by another user.
+    If already locked by the same user, extends the lock.
+    """
+    now = datetime.now()
+    lock_until = now + timedelta(minutes=LOCK_TIMEOUT_MINUTES)
+    
+    # Check existing lock
+    existing = conn.execute("""
+        SELECT locked_by, locked_until FROM example_locks WHERE example_id = ?
+    """, (example_id,)).fetchone()
+    
+    if existing:
+        # Lock exists - check if it's expired or owned by this user
+        existing_until = datetime.fromisoformat(existing["locked_until"])
+        if existing["locked_by"] == user_id:
+            # User's own lock - extend it
+            conn.execute("""
+                UPDATE example_locks SET locked_until = ? WHERE example_id = ?
+            """, (lock_until.isoformat(), example_id))
+            return lock_until
+        elif existing_until > now:
+            # Someone else's active lock
+            return None
+        else:
+            # Expired lock - take it over
+            conn.execute("""
+                UPDATE example_locks SET locked_by = ?, locked_until = ?, created_at = ?
+                WHERE example_id = ?
+            """, (user_id, lock_until.isoformat(), now.isoformat(), example_id))
+            return lock_until
+    else:
+        # No lock - create one
+        conn.execute("""
+            INSERT INTO example_locks (example_id, locked_by, locked_until)
+            VALUES (?, ?, ?)
+        """, (example_id, user_id, lock_until.isoformat()))
+        return lock_until
+
+
+def release_lock(conn, example_id: str, user_id: int) -> bool:
+    """
+    Release a lock on an example.
+    
+    Returns True if lock was released, False if user didn't own the lock.
+    """
+    result = conn.execute("""
+        DELETE FROM example_locks WHERE example_id = ? AND locked_by = ?
+    """, (example_id, user_id))
+    return result.rowcount > 0
+
+
+def get_lock_status(conn, example_id: str) -> Optional[dict]:
+    """Get the current lock status for an example."""
+    row = conn.execute("""
+        SELECT l.locked_by, l.locked_until, u.username, u.display_name
+        FROM example_locks l
+        JOIN users u ON l.locked_by = u.id
+        WHERE l.example_id = ?
+    """, (example_id,)).fetchone()
+    
+    if not row:
+        return None
+    
+    locked_until = datetime.fromisoformat(row["locked_until"])
+    now = datetime.now()
+    
+    if locked_until <= now:
+        # Expired - clean it up
+        conn.execute("DELETE FROM example_locks WHERE example_id = ?", (example_id,))
+        return None
+    
+    return {
+        "locked_by": row["locked_by"],
+        "locked_by_username": row["username"],
+        "locked_by_display_name": row["display_name"],
+        "locked_until": row["locked_until"],
+        "expires_in_seconds": int((locked_until - now).total_seconds())
+    }
+
+
+def cleanup_expired_locks(conn):
+    """Remove all expired locks."""
+    now = datetime.now().isoformat()
+    result = conn.execute("""
+        DELETE FROM example_locks WHERE locked_until < ?
+    """, (now,))
+    return result.rowcount
+
+
+# ============================================================================
 # Authentication Helpers
 # ============================================================================
 
@@ -675,6 +801,7 @@ class ExampleResponse(BaseModel):
     hypothesis_words: list[dict] = Field(..., description="Tokenized hypothesis with character offsets")
     existing_labels: list[dict] = Field(..., description="Previously saved labels for this example (by current user)")
     existing_scores: Optional[dict] = Field(None, description="Previously saved complexity scores (by current user)")
+    lock_until: Optional[str] = Field(None, description="ISO timestamp when the lock on this example expires")
 
 
 class UserCreate(BaseModel):
@@ -704,6 +831,17 @@ class LabelSchemaResponse(BaseModel):
     system_labels: list[str] = Field(..., description="List of all system-defined label names")
     allow_custom: bool = Field(..., description="Whether custom labels are allowed")
     custom_tracking: bool = Field(..., description="Whether custom labels are tracked separately")
+
+
+class LockStatusResponse(BaseModel):
+    """Response containing lock status for an example."""
+    example_id: str = Field(..., description="Example ID")
+    locked: bool = Field(..., description="Whether the example is currently locked")
+    locked_by: Optional[int] = Field(None, description="User ID of lock owner")
+    locked_by_username: Optional[str] = Field(None, description="Username of lock owner")
+    locked_until: Optional[str] = Field(None, description="ISO timestamp when lock expires")
+    expires_in_seconds: Optional[int] = Field(None, description="Seconds until lock expires")
+    is_own_lock: bool = Field(False, description="Whether current user owns the lock")
 
 
 # ============================================================================
@@ -980,6 +1118,144 @@ async def list_datasets():
 
 
 # ============================================================================
+# API Endpoints - Locking
+# ============================================================================
+
+@app.get(
+    "/api/lock/status/{example_id}",
+    tags=["Locking"],
+    summary="Get lock status",
+    description="Check if an example is currently locked and by whom.",
+    response_model=LockStatusResponse,
+)
+async def get_example_lock_status(
+    example_id: str,
+    user: dict = Depends(get_current_user)
+):
+    """Get the lock status for an example."""
+    user_id = user["id"]
+    
+    with get_db() as conn:
+        status = get_lock_status(conn, example_id)
+        
+        if status:
+            return LockStatusResponse(
+                example_id=example_id,
+                locked=True,
+                locked_by=status["locked_by"],
+                locked_by_username=status["locked_by_username"],
+                locked_until=status["locked_until"],
+                expires_in_seconds=status["expires_in_seconds"],
+                is_own_lock=status["locked_by"] == user_id
+            )
+        else:
+            return LockStatusResponse(
+                example_id=example_id,
+                locked=False,
+                is_own_lock=False
+            )
+
+
+@app.post(
+    "/api/lock/release/{example_id}",
+    tags=["Locking"],
+    summary="Release lock",
+    description="Release your lock on an example. Only the lock owner can release it.",
+)
+async def release_example_lock(
+    example_id: str,
+    user: dict = Depends(get_current_user)
+):
+    """Release a lock on an example."""
+    user_id = user["id"]
+    
+    with get_db() as conn:
+        released = release_lock(conn, example_id, user_id)
+        
+        if released:
+            return {"status": "released", "example_id": example_id}
+        else:
+            # Check if it's locked by someone else
+            status = get_lock_status(conn, example_id)
+            if status:
+                raise HTTPException(403, f"Example is locked by {status['locked_by_username']}")
+            else:
+                return {"status": "not_locked", "example_id": example_id}
+
+
+@app.post(
+    "/api/lock/extend/{example_id}",
+    tags=["Locking"],
+    summary="Extend lock",
+    description="Extend your lock on an example by another 30 minutes. Only the lock owner can extend.",
+)
+async def extend_example_lock(
+    example_id: str,
+    user: dict = Depends(get_current_user)
+):
+    """Extend a lock on an example."""
+    user_id = user["id"]
+    
+    with get_db() as conn:
+        # Check current lock
+        status = get_lock_status(conn, example_id)
+        
+        if not status:
+            raise HTTPException(404, "No lock exists for this example")
+        
+        if status["locked_by"] != user_id:
+            raise HTTPException(403, f"Example is locked by {status['locked_by_username']}")
+        
+        # Extend the lock
+        lock_until = acquire_lock(conn, example_id, user_id)
+        
+        return {
+            "status": "extended",
+            "example_id": example_id,
+            "lock_until": lock_until.isoformat(),
+            "expires_in_seconds": LOCK_TIMEOUT_MINUTES * 60
+        }
+
+
+@app.get(
+    "/api/lock/mine",
+    tags=["Locking"],
+    summary="List my locks",
+    description="List all examples currently locked by the current user.",
+)
+async def list_my_locks(user: dict = Depends(get_current_user)):
+    """List all examples locked by the current user."""
+    user_id = user["id"]
+    now = datetime.now()
+    
+    with get_db() as conn:
+        # Clean up expired locks first
+        cleanup_expired_locks(conn)
+        
+        locks = conn.execute("""
+            SELECT l.example_id, l.locked_until, e.dataset, e.premise, e.hypothesis
+            FROM example_locks l
+            JOIN examples e ON l.example_id = e.id
+            WHERE l.locked_by = ?
+            ORDER BY l.locked_until DESC
+        """, (user_id,)).fetchall()
+        
+        return {
+            "locks": [
+                {
+                    "example_id": row["example_id"],
+                    "dataset": row["dataset"],
+                    "premise": row["premise"][:100] + "..." if len(row["premise"]) > 100 else row["premise"],
+                    "locked_until": row["locked_until"],
+                    "expires_in_seconds": int((datetime.fromisoformat(row["locked_until"]) - now).total_seconds())
+                }
+                for row in locks
+            ],
+            "count": len(locks)
+        }
+
+
+# ============================================================================
 # API Endpoints - Examples
 # ============================================================================
 
@@ -987,7 +1263,7 @@ async def list_datasets():
     "/api/example/{dataset}/{row_id}",
     tags=["Examples"],
     summary="Get specific example",
-    description="Retrieve a specific example by dataset and ID. Returns the tokenized text and any existing annotations by the current user.",
+    description="Retrieve a specific example by dataset and ID. Returns the tokenized text and any existing annotations by the current user. Does NOT acquire a lock.",
     response_model=ExampleResponse,
 )
 async def get_example(
@@ -1063,6 +1339,12 @@ async def get_example(
                 "ambiguity": scores_row["ambiguity"],
             }
 
+        # Check lock status
+        lock_status = get_lock_status(conn, row["id"])
+        lock_until = None
+        if lock_status and lock_status["locked_by"] == user_id:
+            lock_until = lock_status["locked_until"]
+
         return ExampleResponse(
             id=row["id"],
             dataset=row["dataset"],
@@ -1073,7 +1355,8 @@ async def get_example(
             premise_words=tokenize_text(row["premise"]),
             hypothesis_words=tokenize_text(row["hypothesis"]),
             existing_labels=existing_labels,
-            existing_scores=existing_scores
+            existing_scores=existing_scores,
+            lock_until=lock_until
         )
 
 
@@ -1081,7 +1364,7 @@ async def get_example(
     "/api/next",
     tags=["Examples"],
     summary="Get next unlabeled example",
-    description="Get a random unlabeled example for the current user. Optionally filter by dataset. Returns complete=true when all examples have been labeled.",
+    description="Get a random unlabeled example for the current user. Optionally filter by dataset. Returns complete=true when all examples have been labeled. Automatically acquires a 30-minute lock on the returned example.",
     response_model=ExampleResponse,
 )
 async def get_next_example(
@@ -1092,30 +1375,51 @@ async def get_next_example(
     user_id = user["id"]
     
     with get_db() as conn:
+        # Clean up expired locks periodically
+        cleanup_expired_locks(conn)
+        
+        now = datetime.now().isoformat()
+        
         # Build query based on whether dataset is specified
         # Only show examples this user hasn't labeled or skipped
+        # Also exclude examples locked by OTHER users (but include user's own locks)
         if dataset:
             ensure_examples_loaded(dataset)
             row = conn.execute("""
                 SELECT e.* FROM examples e
                 LEFT JOIN complexity_scores c ON e.id = c.example_id AND c.annotator_id = ?
                 LEFT JOIN skipped s ON e.id = s.example_id AND s.annotator_id = ?
-                WHERE e.dataset = ? AND c.example_id IS NULL AND s.example_id IS NULL
+                LEFT JOIN example_locks l ON e.id = l.example_id AND l.locked_until > ? AND l.locked_by != ?
+                WHERE e.dataset = ? 
+                  AND c.example_id IS NULL 
+                  AND s.example_id IS NULL
+                  AND l.example_id IS NULL
                 ORDER BY RANDOM()
                 LIMIT 1
-            """, (user_id, user_id, dataset)).fetchone()
+            """, (user_id, user_id, now, user_id, dataset)).fetchone()
         else:
             row = conn.execute("""
                 SELECT e.* FROM examples e
                 LEFT JOIN complexity_scores c ON e.id = c.example_id AND c.annotator_id = ?
                 LEFT JOIN skipped s ON e.id = s.example_id AND s.annotator_id = ?
-                WHERE c.example_id IS NULL AND s.example_id IS NULL
+                LEFT JOIN example_locks l ON e.id = l.example_id AND l.locked_until > ? AND l.locked_by != ?
+                WHERE c.example_id IS NULL 
+                  AND s.example_id IS NULL
+                  AND l.example_id IS NULL
                 ORDER BY RANDOM()
                 LIMIT 1
-            """, (user_id, user_id)).fetchone()
+            """, (user_id, user_id, now, user_id)).fetchone()
 
         if not row:
             return {"message": "No more examples to label!", "complete": True}
+
+        # Acquire lock on this example
+        lock_until = acquire_lock(conn, row["id"], user_id)
+        
+        if not lock_until:
+            # Race condition - someone else got it first, try again
+            # This shouldn't happen often, but handle it gracefully
+            raise HTTPException(409, "Example was locked by another user. Please try again.")
 
         return ExampleResponse(
             id=row["id"],
@@ -1127,7 +1431,8 @@ async def get_next_example(
             premise_words=tokenize_text(row["premise"]),
             hypothesis_words=tokenize_text(row["hypothesis"]),
             existing_labels=[],
-            existing_scores=None
+            existing_scores=None,
+            lock_until=lock_until.isoformat()
         )
 
 
@@ -1139,7 +1444,7 @@ async def get_next_example(
     "/api/annotate",
     tags=["Annotation"],
     summary="Save annotation",
-    description="Save span labels and complexity scores for an example. Replaces any existing annotation by the current user for this example. Labels are validated against the schema - custom labels are allowed but marked with is_custom=true.",
+    description="Save span labels and complexity scores for an example. Replaces any existing annotation by the current user for this example. Labels are validated against the schema - custom labels are allowed but marked with is_custom=true. Releases any lock on the example.",
 )
 async def save_annotation(
     submission: AnnotationSubmission,
@@ -1216,10 +1521,14 @@ async def save_annotation(
                 submission.complexity_scores.get("ambiguity"),
             ))
 
+        # Release the lock (if any)
+        release_lock(conn, submission.example_id, user_id)
+
         response = {
             "status": "saved", 
             "example_id": submission.example_id, 
-            "annotator_id": user_id
+            "annotator_id": user_id,
+            "lock_released": True
         }
         
         if custom_labels_used:
@@ -1233,7 +1542,7 @@ async def save_annotation(
     "/api/skip/{example_id}",
     tags=["Annotation"],
     summary="Skip example",
-    description="Mark an example as skipped. Skipped examples won't appear in /api/next for the current user.",
+    description="Mark an example as skipped. Skipped examples won't appear in /api/next for the current user. Releases any lock on the example.",
 )
 async def skip_example(
     example_id: str,
@@ -1247,7 +1556,11 @@ async def skip_example(
             INSERT OR REPLACE INTO skipped (example_id, annotator_id)
             VALUES (?, ?)
         """, (example_id, user_id))
-        return {"status": "skipped", "example_id": example_id, "annotator_id": user_id}
+        
+        # Release the lock (if any)
+        release_lock(conn, example_id, user_id)
+        
+        return {"status": "skipped", "example_id": example_id, "annotator_id": user_id, "lock_released": True}
 
 
 # ============================================================================
@@ -1258,13 +1571,16 @@ async def skip_example(
     "/api/stats",
     tags=["Statistics"],
     summary="Get statistics",
-    description="Get annotation statistics including per-dataset counts, label distribution, complexity score averages, per-annotator stats, and custom label usage.",
+    description="Get annotation statistics including per-dataset counts, label distribution, complexity score averages, per-annotator stats, custom label usage, and active locks.",
 )
 async def get_stats(user: dict = Depends(get_optional_user)):
     """Get labeling statistics."""
     user_id = user["id"] if user else None
     
     with get_db() as conn:
+        # Clean up expired locks
+        cleanup_expired_locks(conn)
+        
         # Total examples per dataset
         dataset_counts = conn.execute("""
             SELECT dataset, COUNT(*) as total FROM examples GROUP BY dataset
@@ -1338,6 +1654,13 @@ async def get_stats(user: dict = Depends(get_optional_user)):
             ORDER BY labeled DESC
         """).fetchall()
 
+        # Active locks stats
+        lock_stats = conn.execute("""
+            SELECT COUNT(*) as active_locks,
+                   COUNT(DISTINCT locked_by) as users_with_locks
+            FROM example_locks
+        """).fetchone()
+
         # User-specific stats
         user_stats = None
         if user_id:
@@ -1350,10 +1673,14 @@ async def get_stats(user: dict = Depends(get_optional_user)):
             user_custom = conn.execute("""
                 SELECT COUNT(*) as count FROM labels WHERE annotator_id = ? AND is_custom = 1
             """, (user_id,)).fetchone()
+            user_locks = conn.execute("""
+                SELECT COUNT(*) as count FROM example_locks WHERE locked_by = ?
+            """, (user_id,)).fetchone()
             user_stats = {
                 "labeled": user_labeled["count"],
                 "skipped": user_skipped["count"],
-                "custom_labels_used": user_custom["count"]
+                "custom_labels_used": user_custom["count"],
+                "active_locks": user_locks["count"]
             }
 
         return {
@@ -1385,6 +1712,11 @@ async def get_stats(user: dict = Depends(get_optional_user)):
                 "custom_count": custom_stats["custom_count"] or 0,
                 "system_count": custom_stats["system_count"] or 0,
                 "unique_custom_labels": custom_stats["unique_custom_labels"] or 0,
+            },
+            "lock_stats": {
+                "active_locks": lock_stats["active_locks"],
+                "users_with_locks": lock_stats["users_with_locks"],
+                "lock_timeout_minutes": LOCK_TIMEOUT_MINUTES,
             },
             "complexity_averages": {
                 "reasoning": score_avgs["reasoning"],
