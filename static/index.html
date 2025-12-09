@@ -836,6 +836,176 @@
         .help-tab-content.active {
             display: block;
         }
+
+        /* Leaderboard styles */
+        .leaderboard-section {
+            margin-top: 30px;
+        }
+
+        .leaderboard-section h3 {
+            color: var(--accent);
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .leaderboard-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+
+        .leaderboard-table th,
+        .leaderboard-table td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .leaderboard-table th {
+            background: rgba(0, 0, 0, 0.2);
+            color: var(--text-secondary);
+            font-weight: 600;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            cursor: pointer;
+            user-select: none;
+            transition: background 0.2s;
+        }
+
+        .leaderboard-table th:hover {
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .leaderboard-table th.sorted-asc::after {
+            content: ' ▲';
+            font-size: 0.7rem;
+        }
+
+        .leaderboard-table th.sorted-desc::after {
+            content: ' ▼';
+            font-size: 0.7rem;
+        }
+
+        .leaderboard-table tbody tr {
+            transition: background 0.2s;
+        }
+
+        .leaderboard-table tbody tr:hover {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .leaderboard-table tbody tr.current-user {
+            background: rgba(74, 222, 128, 0.15);
+            border-left: 3px solid var(--success);
+        }
+
+        .leaderboard-table tbody tr.current-user:hover {
+            background: rgba(74, 222, 128, 0.2);
+        }
+
+        .rank-cell {
+            font-weight: 600;
+            color: var(--text-secondary);
+            width: 60px;
+        }
+
+        .rank-cell.rank-1 { color: #ffd700; }
+        .rank-cell.rank-2 { color: #c0c0c0; }
+        .rank-cell.rank-3 { color: #cd7f32; }
+
+        .user-cell {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .user-cell .display-name {
+            font-weight: 500;
+        }
+
+        .user-cell .username {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+        }
+
+        .role-badge {
+            font-size: 0.7rem;
+            padding: 2px 6px;
+            border-radius: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .role-badge.admin {
+            background: rgba(139, 92, 246, 0.2);
+            color: #a78bfa;
+        }
+
+        .score-cell {
+            font-weight: 600;
+            color: var(--accent);
+        }
+
+        .reliability-cell {
+            color: var(--text-secondary);
+            font-style: italic;
+        }
+
+        .reliability-cell.has-score {
+            color: var(--success);
+            font-style: normal;
+            font-weight: 500;
+        }
+
+        /* Personal stats card */
+        .personal-stats-card {
+            background: linear-gradient(135deg, rgba(74, 158, 255, 0.1), rgba(74, 222, 128, 0.1));
+            border: 1px solid rgba(74, 158, 255, 0.3);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        .personal-stats-card h3 {
+            color: var(--accent);
+            margin-bottom: 15px;
+            font-size: 1.1rem;
+        }
+
+        .personal-stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 15px;
+        }
+
+        .personal-stat-item {
+            text-align: center;
+        }
+
+        .personal-stat-value {
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: var(--accent);
+        }
+
+        .personal-stat-value.rank {
+            color: var(--success);
+        }
+
+        .personal-stat-label {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }
+
+        .personal-stat-sublabel {
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+            opacity: 0.7;
+        }
     </style>
 </head>
 <body>
@@ -1221,10 +1391,26 @@
 
         <!-- Stats Tab -->
         <div id="stats-tab" class="tab-content hidden">
+            <!-- Personal Stats Card -->
+            <div id="personal-stats-card" class="personal-stats-card hidden">
+                <h3>🏆 Your Progress</h3>
+                <div class="personal-stats-grid" id="personal-stats-grid">
+                    <!-- Filled by JavaScript -->
+                </div>
+            </div>
+
             <div class="card">
                 <h3 style="margin-bottom: 20px;">Labeling Statistics</h3>
                 <div id="stats-content" class="stats-grid">
                     <div class="loading">Loading stats...</div>
+                </div>
+            </div>
+
+            <!-- Leaderboard Section -->
+            <div class="card leaderboard-section">
+                <h3>🏅 Annotator Leaderboard</h3>
+                <div id="leaderboard-content">
+                    <div class="loading">Loading leaderboard...</div>
                 </div>
             </div>
         </div>
@@ -1254,6 +1440,11 @@
         let labels = [];
         let currentUser = null;
         let isAnonymousMode = false;
+
+        // Leaderboard state
+        let leaderboardData = [];
+        let leaderboardSortColumn = 'labeled';
+        let leaderboardSortDirection = 'desc';
 
         // Keyboard navigation state
         let focusedSource = 'premise';  // 'premise' or 'hypothesis'
@@ -2225,6 +2416,10 @@
                 const resp = await authenticatedFetch('/api/stats');
                 const stats = await resp.json();
 
+                // Render personal stats card
+                renderPersonalStats(stats);
+
+                // Render general stats
                 let html = `
                     <div class="stat-card">
                         <div class="stat-label">Total Labeled</div>
@@ -2239,17 +2434,6 @@
                         <div class="stat-value">${stats.spans.examples_with_spans}</div>
                     </div>
                 `;
-
-                // User stats if available
-                if (stats.user_stats) {
-                    html += `
-                        <div class="stat-card" style="border-left: 3px solid var(--success);">
-                            <div class="stat-label">Your Annotations</div>
-                            <div class="stat-value">${stats.user_stats.labeled}</div>
-                            <div style="font-size: 0.8rem; color: #aaa;">${stats.user_stats.skipped} skipped</div>
-                        </div>
-                    `;
-                }
 
                 Object.entries(stats.datasets).forEach(([ds, info]) => {
                     const labeled = stats.labeled[ds] || 0;
@@ -2279,7 +2463,8 @@
 
                 if (Object.keys(stats.label_distribution).length > 0) {
                     html += '<div style="grid-column: 1 / -1; margin-top: 20px;"><h4>Label Distribution</h4></div>';
-                    Object.entries(stats.label_distribution).forEach(([name, count]) => {
+                    Object.entries(stats.label_distribution).forEach(([name, data]) => {
+                        const count = typeof data === 'object' ? data.count : data;
                         html += `
                             <div class="stat-card">
                                 <div class="stat-label">${name}</div>
@@ -2290,9 +2475,155 @@
                 }
 
                 content.innerHTML = html;
+
+                // Render leaderboard
+                renderLeaderboard(stats.annotators || []);
             } catch (e) {
                 content.innerHTML = `<div class="message error">Error loading stats: ${e.message}</div>`;
             }
+        }
+
+        function renderPersonalStats(stats) {
+            const card = document.getElementById('personal-stats-card');
+            const grid = document.getElementById('personal-stats-grid');
+
+            if (!stats.user_stats || !currentUser || currentUser.is_anonymous) {
+                card.classList.add('hidden');
+                return;
+            }
+
+            card.classList.remove('hidden');
+
+            // Calculate user's rank
+            const annotators = stats.annotators || [];
+            const sortedAnnotators = [...annotators].sort((a, b) => b.labeled - a.labeled);
+            const userRank = sortedAnnotators.findIndex(a => a.username === currentUser.username) + 1;
+            const totalAnnotators = sortedAnnotators.length;
+
+            grid.innerHTML = `
+                <div class="personal-stat-item">
+                    <div class="personal-stat-value rank">#${userRank || '—'}</div>
+                    <div class="personal-stat-label">Rank</div>
+                    <div class="personal-stat-sublabel">of ${totalAnnotators} annotators</div>
+                </div>
+                <div class="personal-stat-item">
+                    <div class="personal-stat-value">${stats.user_stats.labeled}</div>
+                    <div class="personal-stat-label">Annotations</div>
+                </div>
+                <div class="personal-stat-item">
+                    <div class="personal-stat-value">${stats.user_stats.skipped}</div>
+                    <div class="personal-stat-label">Skipped</div>
+                </div>
+                <div class="personal-stat-item">
+                    <div class="personal-stat-value" style="color: var(--text-secondary); font-size: 1.2rem;">—</div>
+                    <div class="personal-stat-label">Reliability</div>
+                    <div class="personal-stat-sublabel">coming soon</div>
+                </div>
+            `;
+        }
+
+        function renderLeaderboard(annotators) {
+            const content = document.getElementById('leaderboard-content');
+
+            if (!annotators || annotators.length === 0) {
+                content.innerHTML = '<p style="color: var(--text-secondary);">No annotators yet.</p>';
+                return;
+            }
+
+            // Store data for sorting
+            leaderboardData = annotators;
+
+            // Sort data
+            const sortedData = sortLeaderboardData();
+
+            // Build table
+            let html = `
+                <table class="leaderboard-table">
+                    <thead>
+                        <tr>
+                            <th onclick="sortLeaderboard('rank')">Rank</th>
+                            <th onclick="sortLeaderboard('username')" class="${leaderboardSortColumn === 'username' ? 'sorted-' + leaderboardSortDirection : ''}">User</th>
+                            <th onclick="sortLeaderboard('labeled')" class="${leaderboardSortColumn === 'labeled' ? 'sorted-' + leaderboardSortDirection : ''}">Annotations</th>
+                            <th>Reliability</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+
+            sortedData.forEach((annotator, index) => {
+                const rank = index + 1;
+                const isCurrentUser = currentUser && annotator.username === currentUser.username;
+                const rankClass = rank <= 3 ? `rank-${rank}` : '';
+                const displayName = annotator.display_name || annotator.username;
+                const roleBadge = annotator.role === 'admin' ? '<span class="role-badge admin">Admin</span>' : '';
+
+                html += `
+                    <tr class="${isCurrentUser ? 'current-user' : ''}">
+                        <td class="rank-cell ${rankClass}">${rank}</td>
+                        <td>
+                            <div class="user-cell">
+                                <span class="display-name">${displayName}</span>
+                                ${displayName !== annotator.username ? `<span class="username">@${annotator.username}</span>` : ''}
+                                ${roleBadge}
+                            </div>
+                        </td>
+                        <td class="score-cell">${annotator.labeled}</td>
+                        <td class="reliability-cell">—</td>
+                    </tr>
+                `;
+            });
+
+            html += `
+                    </tbody>
+                </table>
+                <p style="color: var(--text-secondary); font-size: 0.8rem; margin-top: 15px; text-align: center;">
+                    Reliability scores will be available after <a href="https://github.com/GoblinCorps/nli-span-labeler/issues/23" target="_blank" style="color: var(--accent);">#23</a> is implemented.
+                </p>
+            `;
+
+            content.innerHTML = html;
+        }
+
+        function sortLeaderboardData() {
+            const data = [...leaderboardData];
+
+            data.sort((a, b) => {
+                let aVal, bVal;
+
+                switch (leaderboardSortColumn) {
+                    case 'username':
+                        aVal = (a.display_name || a.username).toLowerCase();
+                        bVal = (b.display_name || b.username).toLowerCase();
+                        break;
+                    case 'labeled':
+                    default:
+                        aVal = a.labeled;
+                        bVal = b.labeled;
+                        break;
+                }
+
+                if (aVal < bVal) return leaderboardSortDirection === 'asc' ? -1 : 1;
+                if (aVal > bVal) return leaderboardSortDirection === 'asc' ? 1 : -1;
+                return 0;
+            });
+
+            return data;
+        }
+
+        function sortLeaderboard(column) {
+            if (column === 'rank') {
+                // Rank always sorts by labeled desc
+                leaderboardSortColumn = 'labeled';
+                leaderboardSortDirection = 'desc';
+            } else if (leaderboardSortColumn === column) {
+                // Toggle direction
+                leaderboardSortDirection = leaderboardSortDirection === 'asc' ? 'desc' : 'asc';
+            } else {
+                leaderboardSortColumn = column;
+                leaderboardSortDirection = column === 'labeled' ? 'desc' : 'asc';
+            }
+
+            renderLeaderboard(leaderboardData);
         }
 
         async function lookupExample() {
