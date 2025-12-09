@@ -3,6 +3,7 @@
 NLI Span Labeler - A web-based tool for annotating NLI examples with span-level labels.
 
 Features:
+- WordPiece tokenization matching ModernBERT training target
 - Word-level span selection with position tracking
 - Pre-filled labels for difficulty dimensions and NLI relations
 - Custom label creation with unique colors
@@ -20,6 +21,7 @@ Usage:
 
 Environment Variables:
     ANONYMOUS_MODE=1  - Disable auth, use anonymous user (for local single-user)
+    TOKENIZER_MODEL=answerdotai/ModernBERT-base  - HuggingFace model for tokenizer
 """
 
 import json
@@ -37,6 +39,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 
+# Tokenizer - using the actual training target model
+from transformers import AutoTokenizer
+
 # Paths - relative to this file's directory
 APP_DIR = Path(__file__).parent.resolve()
 DATA_DIR = APP_DIR / "data" / "nli"
@@ -50,11 +55,68 @@ ANONYMOUS_MODE = os.environ.get("ANONYMOUS_MODE", "0") == "1"
 SESSION_EXPIRY_DAYS = 30
 ANONYMOUS_USER_ID = 1
 LEGACY_USER_ID = 2
+TOKENIZER_MODEL = os.environ.get("TOKENIZER_MODEL", "answerdotai/ModernBERT-base")
+
+# Global tokenizer - initialized at startup
+_tokenizer = None
 
 app = FastAPI(title="NLI Span Labeler")
 
 # Mount static files
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
+
+
+# ============================================================================
+# Tokenization
+# ============================================================================
+
+def get_tokenizer():
+    """Get the global tokenizer instance."""
+    global _tokenizer
+    if _tokenizer is None:
+        print(f"Loading tokenizer: {TOKENIZER_MODEL}")
+        _tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_MODEL)
+        print(f"Tokenizer loaded: {type(_tokenizer).__name__}")
+    return _tokenizer
+
+
+def tokenize_text(text: str) -> list[dict]:
+    """
+    Tokenize text using the target model's tokenizer.
+    
+    Returns tokens with character offsets that map back to the original text.
+    WordPiece subword tokens (##xxx) are marked with is_subword=True.
+    
+    This ensures annotators see exactly what the model will see during training.
+    """
+    tokenizer = get_tokenizer()
+    
+    # Tokenize with offset mapping
+    encoding = tokenizer(
+        text,
+        return_offsets_mapping=True,
+        add_special_tokens=False,  # Don't add [CLS], [SEP] for display
+    )
+    
+    tokens = encoding.tokens()
+    offsets = encoding.offset_mapping
+    
+    words = []
+    for i, (token, (char_start, char_end)) in enumerate(zip(tokens, offsets)):
+        # Detect WordPiece subword tokens
+        is_subword = token.startswith("##")
+        display_text = token[2:] if is_subword else token  # Strip ## for display
+        
+        words.append({
+            "index": i,
+            "text": display_text,
+            "token": token,  # Original token including ## prefix
+            "char_start": char_start,
+            "char_end": char_end,
+            "is_subword": is_subword,
+        })
+    
+    return words
 
 
 # ============================================================================
@@ -524,37 +586,16 @@ def ensure_examples_loaded(dataset: str, limit: int = 500):
         return loaded
 
 
-def tokenize_text(text: str) -> list[dict]:
-    """Simple word tokenization with character offsets."""
-    words = []
-    current_pos = 0
-
-    for i, word in enumerate(text.split()):
-        # Find the actual position in the original text
-        start = text.find(word, current_pos)
-        if start == -1:
-            start = current_pos
-        end = start + len(word)
-
-        words.append({
-            "index": i,
-            "text": word,
-            "char_start": start,
-            "char_end": end
-        })
-        current_pos = end
-
-    return words
-
-
 # ============================================================================
 # API Endpoints - Authentication
 # ============================================================================
 
 @app.on_event("startup")
 async def startup():
-    """Initialize database on startup."""
+    """Initialize database and tokenizer on startup."""
     init_db()
+    # Pre-load tokenizer (downloads on first run, then cached)
+    get_tokenizer()
     # Pre-load some datasets
     for dataset in ["snli", "mnli", "anli"]:
         ensure_examples_loaded(dataset, limit=200)
@@ -668,6 +709,17 @@ async def auth_status():
     return {
         "anonymous_mode": ANONYMOUS_MODE,
         "registration_enabled": not ANONYMOUS_MODE
+    }
+
+
+@app.get("/api/tokenizer/info")
+async def tokenizer_info():
+    """Get information about the tokenizer being used."""
+    tokenizer = get_tokenizer()
+    return {
+        "model": TOKENIZER_MODEL,
+        "type": type(tokenizer).__name__,
+        "vocab_size": tokenizer.vocab_size,
     }
 
 
@@ -1028,7 +1080,8 @@ async def get_stats(user: dict = Depends(get_optional_user)):
                 {"username": row["username"], "display_name": row["display_name"], "labeled": row["labeled"]}
                 for row in annotator_stats
             ],
-            "user_stats": user_stats
+            "user_stats": user_stats,
+            "tokenizer": TOKENIZER_MODEL,
         }
 
 
@@ -1083,6 +1136,7 @@ async def export_labels():
                 "gold_label_text": ex["gold_label_text"],
                 "annotator": ex["annotator"],
                 "annotator_name": ex["annotator_name"],
+                "tokenizer": TOKENIZER_MODEL,
                 "complexity_scores": {
                     "reasoning": ex["reasoning"],
                     "creativity": ex["creativity"],
@@ -1094,7 +1148,7 @@ async def export_labels():
                 "span_labels": list(label_spans.values())
             })
 
-        return {"count": len(results), "data": results}
+        return {"count": len(results), "data": results, "tokenizer": TOKENIZER_MODEL}
 
 
 @app.get("/api/users")
