@@ -107,12 +107,24 @@
             margin-bottom: 20px;
         }
 
+        .text-section.active-section {
+            background: rgba(74, 158, 255, 0.05);
+            border-radius: 8px;
+            margin: -8px;
+            padding: 8px;
+            margin-bottom: 12px;
+        }
+
         .text-label {
             font-size: 0.8rem;
             color: var(--text-secondary);
             text-transform: uppercase;
             letter-spacing: 1px;
             margin-bottom: 8px;
+        }
+
+        .text-section.active-section .text-label {
+            color: var(--accent);
         }
 
         .text-content {
@@ -166,6 +178,13 @@
 
         .word:hover {
             background: rgba(255, 255, 255, 0.15);
+        }
+
+        /* Keyboard focus indicator */
+        .word.keyboard-focus {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
+            background: rgba(74, 158, 255, 0.2);
         }
 
         /* Label dots below words */
@@ -272,6 +291,16 @@
             background: rgba(255, 255, 255, 0.1);
             padding: 2px 8px;
             border-radius: 10px;
+        }
+
+        .label-key {
+            font-size: 0.7rem;
+            font-family: monospace;
+            color: var(--text-secondary);
+            background: rgba(255, 255, 255, 0.05);
+            padding: 2px 6px;
+            border-radius: 4px;
+            border: 1px solid #444;
         }
 
         .complexity-section { margin-top: 20px; }
@@ -484,6 +513,28 @@
             color: var(--danger);
         }
 
+        /* Help button */
+        .help-btn {
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid #444;
+            color: var(--text-secondary);
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            cursor: pointer;
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+        }
+
+        .help-btn:hover {
+            background: rgba(74, 158, 255, 0.2);
+            color: var(--accent);
+            border-color: var(--accent);
+        }
+
         /* Legend for label colors */
         .legend {
             display: flex;
@@ -529,6 +580,10 @@
             width: 100%;
             max-width: 400px;
             box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+        }
+
+        .modal.modal-wide {
+            max-width: 600px;
         }
 
         .modal h2 {
@@ -607,6 +662,68 @@
             padding-top: 15px;
             border-top: 1px solid #333;
         }
+
+        /* Keyboard shortcuts help modal */
+        .shortcuts-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        .shortcuts-section h4 {
+            color: var(--accent);
+            margin-bottom: 10px;
+            font-size: 0.9rem;
+        }
+
+        .shortcut-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .shortcut-keys {
+            display: flex;
+            gap: 4px;
+        }
+
+        .shortcut-key {
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid #444;
+            border-radius: 4px;
+            padding: 2px 8px;
+            font-family: monospace;
+            font-size: 0.8rem;
+            color: var(--text-primary);
+        }
+
+        .shortcut-desc {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+        }
+
+        .modal-close {
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 1.2rem;
+            padding: 5px;
+            line-height: 1;
+        }
+
+        .modal-close:hover {
+            color: var(--text-primary);
+        }
+
+        .modal-relative {
+            position: relative;
+        }
     </style>
 </head>
 <body>
@@ -661,6 +778,79 @@
         </div>
     </div>
 
+    <!-- Keyboard Shortcuts Help Modal -->
+    <div id="help-modal" class="modal-overlay hidden">
+        <div class="modal modal-wide modal-relative">
+            <button class="modal-close" onclick="hideHelpModal()">&times;</button>
+            <h2>⌨️ Keyboard Shortcuts</h2>
+            <div class="shortcuts-grid">
+                <div class="shortcuts-section">
+                    <h4>Navigation</h4>
+                    <div class="shortcut-row">
+                        <span class="shortcut-keys"><span class="shortcut-key">j</span> <span class="shortcut-key">→</span></span>
+                        <span class="shortcut-desc">Next word</span>
+                    </div>
+                    <div class="shortcut-row">
+                        <span class="shortcut-keys"><span class="shortcut-key">k</span> <span class="shortcut-key">←</span></span>
+                        <span class="shortcut-desc">Previous word</span>
+                    </div>
+                    <div class="shortcut-row">
+                        <span class="shortcut-keys"><span class="shortcut-key">Tab</span></span>
+                        <span class="shortcut-desc">Switch premise/hypothesis</span>
+                    </div>
+                    <div class="shortcut-row">
+                        <span class="shortcut-keys"><span class="shortcut-key">Home</span></span>
+                        <span class="shortcut-desc">First word</span>
+                    </div>
+                    <div class="shortcut-row">
+                        <span class="shortcut-keys"><span class="shortcut-key">End</span></span>
+                        <span class="shortcut-desc">Last word</span>
+                    </div>
+                </div>
+                <div class="shortcuts-section">
+                    <h4>Labeling</h4>
+                    <div class="shortcut-row">
+                        <span class="shortcut-keys"><span class="shortcut-key">1</span>-<span class="shortcut-key">9</span></span>
+                        <span class="shortcut-desc">Toggle label on focused word</span>
+                    </div>
+                    <div class="shortcut-row">
+                        <span class="shortcut-keys"><span class="shortcut-key">Space</span></span>
+                        <span class="shortcut-desc">Toggle active label on word</span>
+                    </div>
+                    <div class="shortcut-row">
+                        <span class="shortcut-keys"><span class="shortcut-key">c</span></span>
+                        <span class="shortcut-desc">Clear all selections</span>
+                    </div>
+                </div>
+                <div class="shortcuts-section">
+                    <h4>Actions</h4>
+                    <div class="shortcut-row">
+                        <span class="shortcut-keys"><span class="shortcut-key">Enter</span></span>
+                        <span class="shortcut-desc">Save & next example</span>
+                    </div>
+                    <div class="shortcut-row">
+                        <span class="shortcut-keys"><span class="shortcut-key">Esc</span></span>
+                        <span class="shortcut-desc">Skip example</span>
+                    </div>
+                    <div class="shortcut-row">
+                        <span class="shortcut-keys"><span class="shortcut-key">n</span></span>
+                        <span class="shortcut-desc">Load next example</span>
+                    </div>
+                </div>
+                <div class="shortcuts-section">
+                    <h4>Help</h4>
+                    <div class="shortcut-row">
+                        <span class="shortcut-keys"><span class="shortcut-key">?</span></span>
+                        <span class="shortcut-desc">Toggle this help</span>
+                    </div>
+                </div>
+            </div>
+            <p style="text-align: center; margin-top: 20px; color: var(--text-secondary); font-size: 0.85rem;">
+                Press <span class="shortcut-key">?</span> or <span class="shortcut-key">Esc</span> to close
+            </p>
+        </div>
+    </div>
+
     <div class="container">
         <header>
             <h1>NLI Span Labeler</h1>
@@ -670,6 +860,7 @@
                     <span class="username" id="username-display"></span>
                     <button class="logout-btn" onclick="handleLogout()" title="Logout">✕</button>
                 </span>
+                <button class="help-btn" onclick="showHelpModal()" title="Keyboard shortcuts (?)">?</button>
                 <button class="btn btn-secondary" onclick="showStats()">Stats</button>
                 <button class="btn btn-secondary" onclick="exportLabels()">Export</button>
             </div>
@@ -693,12 +884,10 @@
 
             <div class="instructions">
                 <strong>Instructions:</strong>
-                1. Click a label below to select it (highlighted border).
-                2. Click tokens in the premise/hypothesis to toggle them for that label.
-                3. <em>Connected tokens</em> (with a dash) are WordPiece subwords — they're part of the previous word.
-                4. Tokens show colored dots for all their labels; the active label's dot is larger.
-                5. Set complexity scores using sliders or type values directly (1-100).
-                6. Click "Save & Next" when done, or "Skip" to skip.
+                1. Click a label below to select it (or press <strong>1-9</strong>).
+                2. Click tokens or use <strong>j/k</strong> to navigate and <strong>Space</strong> to toggle.
+                3. <em>Connected tokens</em> (with a dash) are WordPiece subwords.
+                4. Press <strong>Enter</strong> to save, <strong>Esc</strong> to skip, <strong>?</strong> for all shortcuts.
             </div>
 
             <div id="message-area"></div>
@@ -725,10 +914,10 @@
 
             <!-- Actions -->
             <div class="actions">
-                <button class="btn btn-warning" onclick="skipExample()">Skip</button>
+                <button class="btn btn-warning" onclick="skipExample()">Skip <span style="opacity: 0.6; font-size: 0.8em;">(Esc)</span></button>
                 <div>
-                    <button class="btn btn-secondary" onclick="clearSelections()">Clear All</button>
-                    <button class="btn btn-success" onclick="saveAndNext()">Save & Next</button>
+                    <button class="btn btn-secondary" onclick="clearSelections()">Clear All <span style="opacity: 0.6; font-size: 0.8em;">(c)</span></button>
+                    <button class="btn btn-success" onclick="saveAndNext()">Save & Next <span style="opacity: 0.6; font-size: 0.8em;">(Enter)</span></button>
                 </div>
             </div>
         </div>
@@ -768,6 +957,10 @@
         let labels = [];
         let currentUser = null;
         let isAnonymousMode = false;
+
+        // Keyboard navigation state
+        let focusedSource = 'premise';  // 'premise' or 'hypothesis'
+        let focusedWordIndex = -1;       // -1 means no focus
 
         // Pre-defined labels with colors
         const presetLabels = [
@@ -967,6 +1160,257 @@
         }
 
         // ============================================================================
+        // Help Modal
+        // ============================================================================
+
+        function showHelpModal() {
+            document.getElementById('help-modal').classList.remove('hidden');
+        }
+
+        function hideHelpModal() {
+            document.getElementById('help-modal').classList.add('hidden');
+        }
+
+        function toggleHelpModal() {
+            const modal = document.getElementById('help-modal');
+            if (modal.classList.contains('hidden')) {
+                showHelpModal();
+            } else {
+                hideHelpModal();
+            }
+        }
+
+        // ============================================================================
+        // Keyboard Navigation
+        // ============================================================================
+
+        function initKeyboardNavigation() {
+            document.addEventListener('keydown', handleKeyDown);
+        }
+
+        function handleKeyDown(e) {
+            // Don't handle keys when typing in inputs
+            if (e.target.matches('input, textarea, select')) {
+                return;
+            }
+
+            // Don't handle if auth modal is shown
+            if (!document.getElementById('auth-modal').classList.contains('hidden')) {
+                return;
+            }
+
+            // Help modal toggle (? key)
+            if (e.key === '?') {
+                e.preventDefault();
+                toggleHelpModal();
+                return;
+            }
+
+            // Close help modal with Escape
+            if (e.key === 'Escape') {
+                if (!document.getElementById('help-modal').classList.contains('hidden')) {
+                    e.preventDefault();
+                    hideHelpModal();
+                    return;
+                }
+            }
+
+            // Only process labeler shortcuts when on labeler tab
+            if (document.getElementById('labeler-tab').classList.contains('hidden')) {
+                return;
+            }
+
+            // Help modal is open - don't process other shortcuts
+            if (!document.getElementById('help-modal').classList.contains('hidden')) {
+                if (e.key === 'Escape') {
+                    e.preventDefault();
+                    hideHelpModal();
+                }
+                return;
+            }
+
+            switch (e.key) {
+                // Navigation: j/k or arrows
+                case 'j':
+                case 'ArrowRight':
+                    e.preventDefault();
+                    navigateWord(1);
+                    break;
+                case 'k':
+                case 'ArrowLeft':
+                    e.preventDefault();
+                    navigateWord(-1);
+                    break;
+
+                // Tab: switch premise/hypothesis
+                case 'Tab':
+                    e.preventDefault();
+                    switchFocusSource();
+                    break;
+
+                // Home/End: first/last word
+                case 'Home':
+                    e.preventDefault();
+                    focusFirstWord();
+                    break;
+                case 'End':
+                    e.preventDefault();
+                    focusLastWord();
+                    break;
+
+                // Space: toggle active label on focused word
+                case ' ':
+                    e.preventDefault();
+                    toggleLabelOnFocusedWord();
+                    break;
+
+                // Number keys 1-9: toggle specific label
+                case '1': case '2': case '3': case '4': case '5':
+                case '6': case '7': case '8': case '9':
+                    e.preventDefault();
+                    toggleLabelByNumber(parseInt(e.key) - 1);
+                    break;
+
+                // Enter: save and next
+                case 'Enter':
+                    e.preventDefault();
+                    saveAndNext();
+                    break;
+
+                // Escape: skip
+                case 'Escape':
+                    e.preventDefault();
+                    skipExample();
+                    break;
+
+                // n: load next example
+                case 'n':
+                    e.preventDefault();
+                    loadNextExample();
+                    break;
+
+                // c: clear all selections
+                case 'c':
+                    e.preventDefault();
+                    clearSelections();
+                    break;
+            }
+        }
+
+        function getWordCount(source) {
+            if (!currentExample) return 0;
+            return source === 'premise' 
+                ? currentExample.premise_words.length 
+                : currentExample.hypothesis_words.length;
+        }
+
+        function navigateWord(delta) {
+            if (!currentExample) return;
+
+            const wordCount = getWordCount(focusedSource);
+            if (wordCount === 0) return;
+
+            if (focusedWordIndex === -1) {
+                // No current focus - start at beginning or end
+                focusedWordIndex = delta > 0 ? 0 : wordCount - 1;
+            } else {
+                focusedWordIndex += delta;
+                // Wrap around
+                if (focusedWordIndex < 0) focusedWordIndex = wordCount - 1;
+                if (focusedWordIndex >= wordCount) focusedWordIndex = 0;
+            }
+
+            updateFocusDisplay();
+        }
+
+        function switchFocusSource() {
+            focusedSource = focusedSource === 'premise' ? 'hypothesis' : 'premise';
+            
+            // Clamp index to new source's word count
+            const wordCount = getWordCount(focusedSource);
+            if (focusedWordIndex >= wordCount) {
+                focusedWordIndex = wordCount - 1;
+            }
+            if (focusedWordIndex < 0 && wordCount > 0) {
+                focusedWordIndex = 0;
+            }
+
+            updateFocusDisplay();
+        }
+
+        function focusFirstWord() {
+            if (!currentExample) return;
+            focusedWordIndex = 0;
+            updateFocusDisplay();
+        }
+
+        function focusLastWord() {
+            if (!currentExample) return;
+            const wordCount = getWordCount(focusedSource);
+            focusedWordIndex = wordCount - 1;
+            updateFocusDisplay();
+        }
+
+        function toggleLabelOnFocusedWord() {
+            if (focusedWordIndex === -1 || activeLabel === null) {
+                if (activeLabel === null) {
+                    showMessage('Select a label first (1-9 keys)', 'error');
+                }
+                return;
+            }
+            toggleWord(focusedSource, focusedWordIndex);
+        }
+
+        function toggleLabelByNumber(labelIndex) {
+            if (labelIndex >= labels.length) return;
+
+            // Select this label as active
+            activeLabel = labelIndex;
+            renderLabels();
+
+            // If we have a focused word, toggle it immediately
+            if (focusedWordIndex !== -1) {
+                toggleWord(focusedSource, focusedWordIndex);
+            }
+
+            updateWordHighlights();
+        }
+
+        function updateFocusDisplay() {
+            // Remove old focus
+            document.querySelectorAll('.word.keyboard-focus').forEach(el => {
+                el.classList.remove('keyboard-focus');
+            });
+            document.querySelectorAll('.text-section.active-section').forEach(el => {
+                el.classList.remove('active-section');
+            });
+
+            if (focusedWordIndex === -1 || !currentExample) return;
+
+            // Add focus to current word
+            const wordEl = document.querySelector(
+                `.word[data-source="${focusedSource}"][data-index="${focusedWordIndex}"]`
+            );
+            if (wordEl) {
+                wordEl.classList.add('keyboard-focus');
+                // Scroll into view if needed
+                wordEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
+
+            // Highlight the active section
+            const sectionEl = document.getElementById(`${focusedSource}-text`)?.closest('.text-section');
+            if (sectionEl) {
+                sectionEl.classList.add('active-section');
+            }
+        }
+
+        function resetFocus() {
+            focusedWordIndex = -1;
+            focusedSource = 'premise';
+            updateFocusDisplay();
+        }
+
+        // ============================================================================
         // Initialization
         // ============================================================================
 
@@ -977,6 +1421,9 @@
             if (isAuthenticated) {
                 initializeApp();
             }
+
+            // Always init keyboard navigation
+            initKeyboardNavigation();
         });
 
         async function initializeApp() {
@@ -1069,6 +1516,7 @@
             grid.innerHTML = labels.map((label, idx) => {
                 const totalSpans = label.spans.premise.size + label.spans.hypothesis.size;
                 const isActive = activeLabel === idx;
+                const keyHint = idx < 9 ? idx + 1 : '';
                 return `
                     <div class="label-item ${isActive ? 'active' : ''}"
                          onclick="selectLabel(${idx})"
@@ -1079,6 +1527,7 @@
                                    onclick="event.stopPropagation()"
                                    onchange="updateLabelName(${idx}, this.value)">
                         </div>
+                        ${keyHint ? `<span class="label-key">${keyHint}</span>` : ''}
                         ${totalSpans > 0 ? `<span class="label-count">${totalSpans}</span>` : ''}
                     </div>
                 `;
@@ -1142,6 +1591,7 @@
                 currentExample = data;
                 resetLabelsForNewExample();
                 renderExample();
+                resetFocus();
             } catch (e) {
                 area.innerHTML = `<div class="message error">Error loading example: ${e.message}</div>`;
             }
@@ -1174,13 +1624,13 @@
                     <span class="example-id">${currentExample.id}</span>
                     <span class="gold-label ${goldLabelClass}">${currentExample.gold_label_text || 'unknown'}</span>
                 </div>
-                <div class="text-section">
+                <div class="text-section" id="premise-section">
                     <div class="text-label">Premise</div>
                     <div class="text-content" id="premise-text">
                         ${renderWords(currentExample.premise_words, 'premise')}
                     </div>
                 </div>
-                <div class="text-section">
+                <div class="text-section" id="hypothesis-section">
                     <div class="text-label">Hypothesis</div>
                     <div class="text-content" id="hypothesis-text">
                         ${renderWords(currentExample.hypothesis_words, 'hypothesis')}
@@ -1222,11 +1672,21 @@
                               data-char-end="${w.char_end}"
                               data-is-subword="${isSubword}"
                               title="${title}"
-                              onclick="toggleWord('${source}', ${w.index})">${w.text}</span>
+                              onclick="handleWordClick('${source}', ${w.index})">${w.text}</span>
                         <div class="label-dots" data-source="${source}" data-index="${w.index}"></div>
                     </span>
                 `;
             }).join('');
+        }
+
+        function handleWordClick(source, index) {
+            // Update keyboard focus to clicked word
+            focusedSource = source;
+            focusedWordIndex = index;
+            updateFocusDisplay();
+
+            // Toggle label
+            toggleWord(source, index);
         }
 
         function loadExistingLabels(existingLabels) {
@@ -1256,7 +1716,7 @@
 
         function toggleWord(source, index) {
             if (activeLabel === null) {
-                showMessage('Select a label first by clicking on it', 'error');
+                showMessage('Select a label first (click or press 1-9)', 'error');
                 return;
             }
 
@@ -1274,9 +1734,11 @@
         function updateWordHighlights() {
             // Clear all word styles and dots
             document.querySelectorAll('.word').forEach(el => {
-                // Preserve subword class if it had it
+                // Preserve subword and keyboard-focus classes if present
                 const isSubword = el.dataset.isSubword === 'true';
+                const hasFocus = el.classList.contains('keyboard-focus');
                 el.className = isSubword ? 'word subword' : 'word';
+                if (hasFocus) el.classList.add('keyboard-focus');
             });
             document.querySelectorAll('.label-dots').forEach(el => {
                 el.innerHTML = '';
@@ -1345,6 +1807,7 @@
             activeLabel = null;
             renderLabels();
             updateWordHighlights();
+            showMessage('Cleared all selections', 'success');
         }
 
         // ============================================================================
@@ -1546,6 +2009,7 @@
                 switchTab('labeler');
                 resetLabelsForNewExample();
                 renderExample();
+                resetFocus();
 
                 if (data.existing_labels && data.existing_labels.length > 0) {
                     loadExistingLabels(data.existing_labels);
