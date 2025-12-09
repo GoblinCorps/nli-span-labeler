@@ -126,6 +126,11 @@
             vertical-align: top;
         }
 
+        /* Subword tokens have reduced left margin to visually connect */
+        .word-container.subword {
+            margin-left: 0;
+        }
+
         .word {
             display: inline-block;
             padding: 2px 6px;
@@ -135,6 +140,26 @@
             border: 2px solid transparent;
             position: relative;
             z-index: 1;
+        }
+
+        /* Subword tokens get a left connector */
+        .word.subword {
+            padding-left: 3px;
+            border-top-left-radius: 0;
+            border-bottom-left-radius: 0;
+        }
+
+        /* Subword indicator */
+        .word.subword::before {
+            content: '';
+            position: absolute;
+            left: -2px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 4px;
+            height: 2px;
+            background: var(--text-secondary);
+            opacity: 0.5;
         }
 
         .word:hover {
@@ -408,6 +433,23 @@
 
         .instructions strong { color: var(--accent); }
 
+        /* Tokenizer info badge */
+        .tokenizer-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: rgba(74, 158, 255, 0.15);
+            color: var(--accent);
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-family: monospace;
+        }
+
+        .tokenizer-badge::before {
+            content: '🔤';
+        }
+
         /* Legend for label colors */
         .legend {
             display: flex;
@@ -438,6 +480,7 @@
         <header>
             <h1>NLI Span Labeler</h1>
             <div class="header-buttons">
+                <span class="tokenizer-badge" id="tokenizer-badge">Loading...</span>
                 <button class="btn btn-secondary" onclick="showStats()">Stats</button>
                 <button class="btn btn-secondary" onclick="exportLabels()">Export</button>
             </div>
@@ -462,10 +505,11 @@
             <div class="instructions">
                 <strong>Instructions:</strong>
                 1. Click a label below to select it (highlighted border).
-                2. Click words in the premise/hypothesis to toggle them for that label.
-                3. Words show colored dots for all their labels; the active label's dot is larger.
-                4. Set complexity scores using sliders or type values directly (1-100).
-                5. Click "Save & Next" when done, or "Skip" to skip.
+                2. Click tokens in the premise/hypothesis to toggle them for that label.
+                3. <em>Connected tokens</em> (with a dash) are WordPiece subwords — they're part of the previous word.
+                4. Tokens show colored dots for all their labels; the active label's dot is larger.
+                5. Set complexity scores using sliders or type values directly (1-100).
+                6. Click "Save & Next" when done, or "Skip" to skip.
             </div>
 
             <div id="message-area"></div>
@@ -559,11 +603,29 @@
 
         // Initialize
         document.addEventListener('DOMContentLoaded', async () => {
-            await loadDatasets();
+            await Promise.all([
+                loadDatasets(),
+                loadTokenizerInfo()
+            ]);
             initLabels();
             initComplexityInputs();
             loadNextExample();
         });
+
+        async function loadTokenizerInfo() {
+            try {
+                const resp = await fetch('/api/tokenizer/info');
+                const info = await resp.json();
+                const badge = document.getElementById('tokenizer-badge');
+                // Show just the model name, not the full path
+                const shortName = info.model.split('/').pop();
+                badge.textContent = shortName;
+                badge.title = `Tokenizer: ${info.model} (${info.type}, vocab: ${info.vocab_size.toLocaleString()})`;
+            } catch (e) {
+                console.error('Failed to load tokenizer info:', e);
+                document.getElementById('tokenizer-badge').textContent = 'tokenizer';
+            }
+        }
 
         async function loadDatasets() {
             try {
@@ -760,17 +822,26 @@
         }
 
         function renderWords(words, source) {
-            return words.map(w => `
-                <span class="word-container">
-                    <span class="word"
-                          data-source="${source}"
-                          data-index="${w.index}"
-                          data-char-start="${w.char_start}"
-                          data-char-end="${w.char_end}"
-                          onclick="toggleWord('${source}', ${w.index})">${w.text}</span>
-                    <div class="label-dots" data-source="${source}" data-index="${w.index}"></div>
-                </span>
-            `).join('');
+            return words.map(w => {
+                const isSubword = w.is_subword || false;
+                const containerClass = isSubword ? 'word-container subword' : 'word-container';
+                const wordClass = isSubword ? 'word subword' : 'word';
+                const title = w.token ? `Token: ${w.token}` : '';
+                
+                return `
+                    <span class="${containerClass}">
+                        <span class="${wordClass}"
+                              data-source="${source}"
+                              data-index="${w.index}"
+                              data-char-start="${w.char_start}"
+                              data-char-end="${w.char_end}"
+                              data-is-subword="${isSubword}"
+                              title="${title}"
+                              onclick="toggleWord('${source}', ${w.index})">${w.text}</span>
+                        <div class="label-dots" data-source="${source}" data-index="${w.index}"></div>
+                    </span>
+                `;
+            }).join('');
         }
 
         function loadExistingLabels(existingLabels) {
@@ -818,7 +889,9 @@
         function updateWordHighlights() {
             // Clear all word styles and dots
             document.querySelectorAll('.word').forEach(el => {
-                el.className = 'word';
+                // Preserve subword class if it had it
+                const isSubword = el.dataset.isSubword === 'true';
+                el.className = isSubword ? 'word subword' : 'word';
             });
             document.querySelectorAll('.label-dots').forEach(el => {
                 el.innerHTML = '';
