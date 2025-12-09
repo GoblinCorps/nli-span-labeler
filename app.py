@@ -13,6 +13,7 @@ Features:
 - Stats dashboard and export
 - Multi-user support with session-based authentication
 - Annotator tracking for all labels and scores
+- Label schema enforcement with custom label tracking
 
 Usage:
     cd nli-span-labeler
@@ -57,6 +58,57 @@ ANONYMOUS_USER_ID = 1
 LEGACY_USER_ID = 2
 TOKENIZER_MODEL = os.environ.get("TOKENIZER_MODEL", "answerdotai/ModernBERT-base")
 
+# ============================================================================
+# Label Schema Configuration
+# ============================================================================
+
+# System-defined labels organized by category
+# These are the "official" labels that get is_custom=False
+# Any label not in this list will be marked is_custom=True
+SYSTEM_LABELS = {
+    "difficulty": {
+        "description": "Difficulty dimension labels for complexity analysis",
+        "labels": [
+            {"name": "reasoning", "color": "#3b82f6", "description": "Requires logical inference"},
+            {"name": "creativity", "color": "#8b5cf6", "description": "Requires imaginative interpretation"},
+            {"name": "domain_knowledge", "color": "#06b6d4", "description": "Requires specialized expertise"},
+            {"name": "contextual", "color": "#22c55e", "description": "Depends on implicit context"},
+            {"name": "constraints", "color": "#eab308", "description": "Multiple conditions to track"},
+            {"name": "ambiguity", "color": "#f97316", "description": "Answer is debatable"},
+        ]
+    },
+    "nli": {
+        "description": "Natural Language Inference relation labels",
+        "labels": [
+            {"name": "entailment", "color": "#4ade80", "description": "Marks tokens supporting entailment"},
+            {"name": "neutral", "color": "#fbbf24", "description": "Marks tokens indicating neutrality"},
+            {"name": "contradiction", "color": "#f87171", "description": "Marks tokens showing contradiction"},
+        ]
+    }
+}
+
+# Flattened set of all system label names for quick lookup
+SYSTEM_LABEL_NAMES = set()
+for category in SYSTEM_LABELS.values():
+    for label in category["labels"]:
+        SYSTEM_LABEL_NAMES.add(label["name"])
+
+
+def is_system_label(label_name: str) -> bool:
+    """Check if a label name is a system-defined label."""
+    return label_name.lower() in SYSTEM_LABEL_NAMES
+
+
+def get_label_schema() -> dict:
+    """Get the complete label schema with metadata."""
+    return {
+        "categories": SYSTEM_LABELS,
+        "system_labels": sorted(SYSTEM_LABEL_NAMES),
+        "allow_custom": True,
+        "custom_tracking": True,
+    }
+
+
 # Global tokenizer - initialized at startup
 _tokenizer = None
 
@@ -76,6 +128,7 @@ A multi-user annotation tool for Natural Language Inference (NLI) examples with 
 - **Complexity scoring**: Rate examples on 6 difficulty dimensions (1-100 scale)
 - **Multi-user support**: Session-based authentication with per-user annotation tracking
 - **WordPiece tokenization**: Uses ModernBERT tokenizer for model-aligned annotations
+- **Label schema enforcement**: System labels tracked separately from custom labels
 
 ## Authentication
 
@@ -83,6 +136,14 @@ Most endpoints require authentication via session cookie. Use the `/api/auth/log
 `/api/auth/register` endpoints to obtain a session.
 
 Set `ANONYMOUS_MODE=1` environment variable to disable authentication for local single-user usage.
+
+## Label Schema
+
+The system defines official labels in two categories:
+- **Difficulty**: reasoning, creativity, domain_knowledge, contextual, constraints, ambiguity
+- **NLI**: entailment, neutral, contradiction
+
+Custom labels are allowed but tracked with `is_custom=True` for data quality analysis.
 
 ## Datasets
 
@@ -111,7 +172,7 @@ TAGS_METADATA = [
     },
     {
         "name": "System",
-        "description": "System information endpoints (tokenizer, datasets, health).",
+        "description": "System information endpoints (tokenizer, datasets, labels, health).",
     },
 ]
 
@@ -209,11 +270,13 @@ def init_db():
         labels_exist = cursor.fetchone() is not None
         
         # Check if annotator_id column exists in labels
-        needs_migration = False
+        needs_user_migration = False
+        needs_custom_migration = False
         if labels_exist:
             cursor = conn.execute("PRAGMA table_info(labels)")
             columns = [row[1] for row in cursor.fetchall()]
-            needs_migration = 'annotator_id' not in columns
+            needs_user_migration = 'annotator_id' not in columns
+            needs_custom_migration = 'is_custom' not in columns
 
         # Create users table first (needed for foreign keys)
         conn.executescript("""
@@ -267,11 +330,14 @@ def init_db():
         """)
 
         # Handle migration for existing tables
-        if needs_migration and labels_exist:
-            # Migrate existing data
+        if needs_user_migration and labels_exist:
+            # Migrate existing data (add annotator_id)
             migrate_existing_data(conn)
+        elif needs_custom_migration and labels_exist:
+            # Add is_custom column to existing table
+            migrate_add_is_custom(conn)
         else:
-            # Create new tables with annotator_id
+            # Create new tables with all columns
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS labels (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -279,6 +345,7 @@ def init_db():
                     annotator_id INTEGER NOT NULL DEFAULT 1,
                     label_name TEXT NOT NULL,
                     label_color TEXT,
+                    is_custom BOOLEAN NOT NULL DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (example_id) REFERENCES examples(id),
                     FOREIGN KEY (annotator_id) REFERENCES users(id)
@@ -323,6 +390,7 @@ def init_db():
 
                 CREATE INDEX IF NOT EXISTS idx_labels_example ON labels(example_id);
                 CREATE INDEX IF NOT EXISTS idx_labels_annotator ON labels(annotator_id);
+                CREATE INDEX IF NOT EXISTS idx_labels_custom ON labels(is_custom);
                 CREATE INDEX IF NOT EXISTS idx_spans_label ON span_selections(label_id);
                 CREATE INDEX IF NOT EXISTS idx_complexity_annotator ON complexity_scores(annotator_id);
                 CREATE INDEX IF NOT EXISTS idx_skipped_annotator ON skipped(annotator_id);
@@ -340,7 +408,7 @@ def migrate_existing_data(conn):
         ALTER TABLE skipped RENAME TO skipped_old;
     """)
     
-    # Create new tables with annotator_id
+    # Create new tables with annotator_id and is_custom
     conn.executescript("""
         CREATE TABLE labels (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -348,6 +416,7 @@ def migrate_existing_data(conn):
             annotator_id INTEGER NOT NULL DEFAULT 2,
             label_name TEXT NOT NULL,
             label_color TEXT,
+            is_custom BOOLEAN NOT NULL DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (example_id) REFERENCES examples(id),
             FOREIGN KEY (annotator_id) REFERENCES users(id)
@@ -380,12 +449,15 @@ def migrate_existing_data(conn):
         );
     """)
     
-    # Copy data with legacy user ID
-    conn.execute("""
-        INSERT INTO labels (id, example_id, annotator_id, label_name, label_color, created_at)
-        SELECT id, example_id, ?, label_name, label_color, created_at
-        FROM labels_old
-    """, (LEGACY_USER_ID,))
+    # Copy data with legacy user ID, determining is_custom for each label
+    old_labels = conn.execute("SELECT * FROM labels_old").fetchall()
+    for label in old_labels:
+        is_custom = 0 if is_system_label(label["label_name"]) else 1
+        conn.execute("""
+            INSERT INTO labels (id, example_id, annotator_id, label_name, label_color, is_custom, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (label["id"], label["example_id"], LEGACY_USER_ID, 
+              label["label_name"], label["label_color"], is_custom, label["created_at"]))
     
     conn.execute("""
         INSERT INTO complexity_scores (example_id, annotator_id, reasoning, creativity, 
@@ -412,12 +484,33 @@ def migrate_existing_data(conn):
     conn.executescript("""
         CREATE INDEX IF NOT EXISTS idx_labels_example ON labels(example_id);
         CREATE INDEX IF NOT EXISTS idx_labels_annotator ON labels(annotator_id);
+        CREATE INDEX IF NOT EXISTS idx_labels_custom ON labels(is_custom);
         CREATE INDEX IF NOT EXISTS idx_spans_label ON span_selections(label_id);
         CREATE INDEX IF NOT EXISTS idx_complexity_annotator ON complexity_scores(annotator_id);
         CREATE INDEX IF NOT EXISTS idx_skipped_annotator ON skipped(annotator_id);
     """)
     
     print("Migration complete. Existing annotations assigned to 'legacy' user.")
+
+
+def migrate_add_is_custom(conn):
+    """Add is_custom column to existing labels table."""
+    print("Adding is_custom column to labels table...")
+    
+    # Add column
+    conn.execute("ALTER TABLE labels ADD COLUMN is_custom BOOLEAN NOT NULL DEFAULT 0")
+    
+    # Update existing labels based on SYSTEM_LABELS
+    # Mark labels not in system labels as custom
+    all_labels = conn.execute("SELECT id, label_name FROM labels").fetchall()
+    for label in all_labels:
+        is_custom = 0 if is_system_label(label["label_name"]) else 1
+        conn.execute("UPDATE labels SET is_custom = ? WHERE id = ?", (is_custom, label["id"]))
+    
+    # Add index
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_labels_custom ON labels(is_custom)")
+    
+    print(f"Migration complete. Updated {len(all_labels)} labels.")
 
 
 @contextmanager
@@ -603,6 +696,14 @@ class UserResponse(BaseModel):
     username: str = Field(..., description="Username")
     display_name: Optional[str] = Field(None, description="Display name")
     is_anonymous: bool = Field(False, description="True if running in anonymous mode")
+
+
+class LabelSchemaResponse(BaseModel):
+    """Response containing the label schema configuration."""
+    categories: dict = Field(..., description="Label categories with their labels")
+    system_labels: list[str] = Field(..., description="List of all system-defined label names")
+    allow_custom: bool = Field(..., description="Whether custom labels are allowed")
+    custom_tracking: bool = Field(..., description="Whether custom labels are tracked separately")
 
 
 # ============================================================================
@@ -844,6 +945,24 @@ async def tokenizer_info():
 
 
 @app.get(
+    "/api/labels",
+    tags=["System"],
+    summary="Get label schema",
+    description="Get the label schema configuration including system-defined labels and custom label policy.",
+    response_model=LabelSchemaResponse,
+)
+async def get_labels():
+    """Get the label schema configuration."""
+    schema = get_label_schema()
+    return LabelSchemaResponse(
+        categories=schema["categories"],
+        system_labels=schema["system_labels"],
+        allow_custom=schema["allow_custom"],
+        custom_tracking=schema["custom_tracking"],
+    )
+
+
+@app.get(
     "/api/datasets",
     tags=["System"],
     summary="List available datasets",
@@ -899,7 +1018,7 @@ async def get_example(
 
         # Get existing labels for this user
         labels = conn.execute("""
-            SELECT l.id, l.label_name, l.label_color,
+            SELECT l.id, l.label_name, l.label_color, l.is_custom,
                    GROUP_CONCAT(s.source || ':' || s.word_index || ':' || s.word_text, '|') as spans
             FROM labels l
             LEFT JOIN span_selections s ON s.label_id = l.id
@@ -923,6 +1042,7 @@ async def get_example(
                 "id": label["id"],
                 "label_name": label["label_name"],
                 "label_color": label["label_color"],
+                "is_custom": bool(label["is_custom"]),
                 "spans": spans
             })
 
@@ -1019,7 +1139,7 @@ async def get_next_example(
     "/api/annotate",
     tags=["Annotation"],
     summary="Save annotation",
-    description="Save span labels and complexity scores for an example. Replaces any existing annotation by the current user for this example.",
+    description="Save span labels and complexity scores for an example. Replaces any existing annotation by the current user for this example. Labels are validated against the schema - custom labels are allowed but marked with is_custom=true.",
 )
 async def save_annotation(
     submission: AnnotationSubmission,
@@ -1027,6 +1147,9 @@ async def save_annotation(
 ):
     """Save span labels and complexity scores for the current user."""
     user_id = user["id"]
+    
+    # Track which labels are custom for the response
+    custom_labels_used = []
     
     with get_db() as conn:
         # Verify example exists
@@ -1044,15 +1167,20 @@ async def save_annotation(
             (submission.example_id, user_id)
         )
 
-        # Save new labels
+        # Save new labels with is_custom flag
         for label in submission.labels:
             if not label.spans:
                 continue  # Skip labels with no spans
 
+            # Check if this is a custom label
+            is_custom = not is_system_label(label.label_name)
+            if is_custom:
+                custom_labels_used.append(label.label_name)
+
             cursor = conn.execute("""
-                INSERT INTO labels (example_id, annotator_id, label_name, label_color)
-                VALUES (?, ?, ?, ?)
-            """, (submission.example_id, user_id, label.label_name, label.label_color))
+                INSERT INTO labels (example_id, annotator_id, label_name, label_color, is_custom)
+                VALUES (?, ?, ?, ?, ?)
+            """, (submission.example_id, user_id, label.label_name, label.label_color, is_custom))
             label_id = cursor.lastrowid
 
             # Save span selections
@@ -1088,7 +1216,17 @@ async def save_annotation(
                 submission.complexity_scores.get("ambiguity"),
             ))
 
-        return {"status": "saved", "example_id": submission.example_id, "annotator_id": user_id}
+        response = {
+            "status": "saved", 
+            "example_id": submission.example_id, 
+            "annotator_id": user_id
+        }
+        
+        if custom_labels_used:
+            response["custom_labels"] = custom_labels_used
+            response["note"] = f"Custom labels used: {', '.join(custom_labels_used)}. These are tracked separately from system labels."
+        
+        return response
 
 
 @app.post(
@@ -1120,7 +1258,7 @@ async def skip_example(
     "/api/stats",
     tags=["Statistics"],
     summary="Get statistics",
-    description="Get annotation statistics including per-dataset counts, label distribution, complexity score averages, and per-annotator stats.",
+    description="Get annotation statistics including per-dataset counts, label distribution, complexity score averages, per-annotator stats, and custom label usage.",
 )
 async def get_stats(user: dict = Depends(get_optional_user)):
     """Get labeling statistics."""
@@ -1160,13 +1298,22 @@ async def get_stats(user: dict = Depends(get_optional_user)):
             LEFT JOIN span_selections s ON s.label_id = l.id
         """).fetchone()
 
-        # Label distribution
+        # Label distribution (with custom flag)
         label_dist = conn.execute("""
-            SELECT label_name, COUNT(*) as count
+            SELECT label_name, is_custom, COUNT(*) as count
             FROM labels
-            GROUP BY label_name
+            GROUP BY label_name, is_custom
             ORDER BY count DESC
         """).fetchall()
+
+        # Custom label stats
+        custom_stats = conn.execute("""
+            SELECT 
+                SUM(CASE WHEN is_custom = 1 THEN 1 ELSE 0 END) as custom_count,
+                SUM(CASE WHEN is_custom = 0 THEN 1 ELSE 0 END) as system_count,
+                COUNT(DISTINCT CASE WHEN is_custom = 1 THEN label_name END) as unique_custom_labels
+            FROM labels
+        """).fetchone()
 
         # Complexity score averages
         score_avgs = conn.execute("""
@@ -1200,9 +1347,13 @@ async def get_stats(user: dict = Depends(get_optional_user)):
             user_skipped = conn.execute("""
                 SELECT COUNT(*) as count FROM skipped WHERE annotator_id = ?
             """, (user_id,)).fetchone()
+            user_custom = conn.execute("""
+                SELECT COUNT(*) as count FROM labels WHERE annotator_id = ? AND is_custom = 1
+            """, (user_id,)).fetchone()
             user_stats = {
                 "labeled": user_labeled["count"],
-                "skipped": user_skipped["count"]
+                "skipped": user_skipped["count"],
+                "custom_labels_used": user_custom["count"]
             }
 
         return {
@@ -1224,8 +1375,16 @@ async def get_stats(user: dict = Depends(get_optional_user)):
                 "examples_with_spans": span_stats["examples_with_spans"]
             },
             "label_distribution": {
-                row["label_name"]: row["count"]
+                row["label_name"]: {
+                    "count": row["count"],
+                    "is_custom": bool(row["is_custom"])
+                }
                 for row in label_dist
+            },
+            "custom_label_stats": {
+                "custom_count": custom_stats["custom_count"] or 0,
+                "system_count": custom_stats["system_count"] or 0,
+                "unique_custom_labels": custom_stats["unique_custom_labels"] or 0,
             },
             "complexity_averages": {
                 "reasoning": score_avgs["reasoning"],
@@ -1249,7 +1408,7 @@ async def get_stats(user: dict = Depends(get_optional_user)):
     "/api/export",
     tags=["Statistics"],
     summary="Export annotations",
-    description="Export all annotations as JSONL format. Includes annotator information, complexity scores, and span labels.",
+    description="Export all annotations as JSONL format. Includes annotator information, complexity scores, span labels with is_custom flag.",
 )
 async def export_labels():
     """Export all labels as JSONL with annotator information."""
@@ -1267,7 +1426,7 @@ async def export_labels():
         for ex in examples:
             # Get labels for this example by this annotator
             labels = conn.execute("""
-                SELECT l.label_name, l.label_color,
+                SELECT l.label_name, l.label_color, l.is_custom,
                        s.source, s.word_index, s.word_text, s.char_start, s.char_end
                 FROM labels l
                 JOIN span_selections s ON s.label_id = l.id
@@ -1282,6 +1441,7 @@ async def export_labels():
                     label_spans[name] = {
                         "label_name": name,
                         "label_color": row["label_color"],
+                        "is_custom": bool(row["is_custom"]),
                         "spans": []
                     }
                 label_spans[name]["spans"].append({
