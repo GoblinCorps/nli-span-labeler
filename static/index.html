@@ -52,6 +52,7 @@
         .header-buttons {
             display: flex;
             gap: 10px;
+            align-items: center;
         }
 
         .btn {
@@ -69,6 +70,7 @@
         .btn-warning { background: var(--warning); color: #1a1a2e; }
         .btn-danger { background: var(--danger); color: white; }
         .btn-secondary { background: #444; color: white; }
+        .btn-small { padding: 4px 10px; font-size: 0.8rem; }
 
         .card {
             background: var(--bg-card);
@@ -450,6 +452,38 @@
             content: '🔤';
         }
 
+        /* User info badge */
+        .user-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(74, 222, 128, 0.15);
+            color: var(--success);
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+        }
+
+        .user-badge .username {
+            font-weight: 600;
+        }
+
+        .user-badge .logout-btn {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            padding: 2px 4px;
+            font-size: 0.75rem;
+            opacity: 0.7;
+            transition: opacity 0.2s;
+        }
+
+        .user-badge .logout-btn:hover {
+            opacity: 1;
+            color: var(--danger);
+        }
+
         /* Legend for label colors */
         .legend {
             display: flex;
@@ -473,14 +507,169 @@
             height: 8px;
             border-radius: 50%;
         }
+
+        /* Auth Modal */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+
+        .modal {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 30px;
+            width: 100%;
+            max-width: 400px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+        }
+
+        .modal h2 {
+            color: var(--accent);
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .modal-tabs {
+            display: flex;
+            margin-bottom: 20px;
+            border-bottom: 1px solid #333;
+        }
+
+        .modal-tab {
+            flex: 1;
+            padding: 10px;
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -1px;
+        }
+
+        .modal-tab:hover { color: var(--text-primary); }
+        .modal-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 10px 12px;
+            background: var(--bg-dark);
+            border: 1px solid #444;
+            border-radius: 6px;
+            color: var(--text-primary);
+            font-size: 0.95rem;
+        }
+
+        .form-group input:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
+        .form-error {
+            color: var(--danger);
+            font-size: 0.85rem;
+            margin-top: 5px;
+        }
+
+        .modal-actions {
+            margin-top: 20px;
+        }
+
+        .modal-actions .btn {
+            width: 100%;
+            padding: 12px;
+        }
+
+        .anonymous-note {
+            text-align: center;
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #333;
+        }
     </style>
 </head>
 <body>
+    <!-- Auth Modal -->
+    <div id="auth-modal" class="modal-overlay hidden">
+        <div class="modal">
+            <h2>NLI Span Labeler</h2>
+            <div class="modal-tabs">
+                <button class="modal-tab active" onclick="switchAuthTab('login')">Login</button>
+                <button class="modal-tab" onclick="switchAuthTab('register')">Register</button>
+            </div>
+
+            <!-- Login Form -->
+            <form id="login-form" onsubmit="handleLogin(event)">
+                <div class="form-group">
+                    <label for="login-username">Username</label>
+                    <input type="text" id="login-username" required minlength="3" autocomplete="username">
+                </div>
+                <div class="form-group">
+                    <label for="login-password">Password</label>
+                    <input type="password" id="login-password" required minlength="6" autocomplete="current-password">
+                </div>
+                <div id="login-error" class="form-error hidden"></div>
+                <div class="modal-actions">
+                    <button type="submit" class="btn btn-primary">Login</button>
+                </div>
+            </form>
+
+            <!-- Register Form -->
+            <form id="register-form" class="hidden" onsubmit="handleRegister(event)">
+                <div class="form-group">
+                    <label for="register-username">Username</label>
+                    <input type="text" id="register-username" required minlength="3" autocomplete="username">
+                </div>
+                <div class="form-group">
+                    <label for="register-display">Display Name (optional)</label>
+                    <input type="text" id="register-display" autocomplete="name">
+                </div>
+                <div class="form-group">
+                    <label for="register-password">Password</label>
+                    <input type="password" id="register-password" required minlength="6" autocomplete="new-password">
+                </div>
+                <div id="register-error" class="form-error hidden"></div>
+                <div class="modal-actions">
+                    <button type="submit" class="btn btn-success">Create Account</button>
+                </div>
+            </form>
+
+            <div id="anonymous-note" class="anonymous-note hidden">
+                Running in anonymous mode. No login required.
+            </div>
+        </div>
+    </div>
+
     <div class="container">
         <header>
             <h1>NLI Span Labeler</h1>
             <div class="header-buttons">
                 <span class="tokenizer-badge" id="tokenizer-badge">Loading...</span>
+                <span id="user-info" class="user-badge hidden">
+                    <span class="username" id="username-display"></span>
+                    <button class="logout-btn" onclick="handleLogout()" title="Logout">✕</button>
+                </span>
                 <button class="btn btn-secondary" onclick="showStats()">Stats</button>
                 <button class="btn btn-secondary" onclick="exportLabels()">Export</button>
             </div>
@@ -571,10 +760,14 @@
     </div>
 
     <script>
+        // ============================================================================
         // State
+        // ============================================================================
         let currentExample = null;
         let activeLabel = null;
         let labels = [];
+        let currentUser = null;
+        let isAnonymousMode = false;
 
         // Pre-defined labels with colors
         const presetLabels = [
@@ -601,8 +794,192 @@
             { key: 'ambiguity', label: 'Ambiguity', description: 'Answer debatability' },
         ];
 
-        // Initialize
+        // ============================================================================
+        // Authentication
+        // ============================================================================
+
+        async function checkAuthStatus() {
+            try {
+                // First check if we're in anonymous mode
+                const statusResp = await fetch('/api/auth/status');
+                const status = await statusResp.json();
+                isAnonymousMode = status.anonymous_mode;
+
+                if (isAnonymousMode) {
+                    // Anonymous mode - no login needed
+                    currentUser = { username: 'anonymous', display_name: 'Anonymous', is_anonymous: true };
+                    hideAuthModal();
+                    updateUserDisplay();
+                    return true;
+                }
+
+                // Check if user is already logged in
+                const meResp = await fetch('/api/me');
+                const meData = await meResp.json();
+
+                if (meData.authenticated === false) {
+                    // Not logged in - show auth modal
+                    showAuthModal();
+                    return false;
+                }
+
+                // User is logged in
+                currentUser = meData;
+                hideAuthModal();
+                updateUserDisplay();
+                return true;
+            } catch (e) {
+                console.error('Auth check failed:', e);
+                showAuthModal();
+                return false;
+            }
+        }
+
+        function showAuthModal() {
+            document.getElementById('auth-modal').classList.remove('hidden');
+            if (isAnonymousMode) {
+                document.getElementById('anonymous-note').classList.remove('hidden');
+            }
+        }
+
+        function hideAuthModal() {
+            document.getElementById('auth-modal').classList.add('hidden');
+        }
+
+        function switchAuthTab(tab) {
+            document.querySelectorAll('.modal-tab').forEach(t => t.classList.remove('active'));
+            document.querySelector(`.modal-tab:${tab === 'login' ? 'first-child' : 'last-child'}`).classList.add('active');
+            
+            document.getElementById('login-form').classList.toggle('hidden', tab !== 'login');
+            document.getElementById('register-form').classList.toggle('hidden', tab !== 'register');
+            
+            // Clear errors
+            document.getElementById('login-error').classList.add('hidden');
+            document.getElementById('register-error').classList.add('hidden');
+        }
+
+        async function handleLogin(event) {
+            event.preventDefault();
+            const username = document.getElementById('login-username').value;
+            const password = document.getElementById('login-password').value;
+            const errorEl = document.getElementById('login-error');
+
+            try {
+                const resp = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    errorEl.textContent = err.detail || 'Login failed';
+                    errorEl.classList.remove('hidden');
+                    return;
+                }
+
+                // Success - reload auth state
+                await checkAuthStatus();
+                initializeApp();
+            } catch (e) {
+                errorEl.textContent = 'Connection error. Please try again.';
+                errorEl.classList.remove('hidden');
+            }
+        }
+
+        async function handleRegister(event) {
+            event.preventDefault();
+            const username = document.getElementById('register-username').value;
+            const display_name = document.getElementById('register-display').value || null;
+            const password = document.getElementById('register-password').value;
+            const errorEl = document.getElementById('register-error');
+
+            try {
+                const resp = await fetch('/api/auth/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password, display_name })
+                });
+
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    errorEl.textContent = err.detail || 'Registration failed';
+                    errorEl.classList.remove('hidden');
+                    return;
+                }
+
+                // Success - reload auth state
+                await checkAuthStatus();
+                initializeApp();
+            } catch (e) {
+                errorEl.textContent = 'Connection error. Please try again.';
+                errorEl.classList.remove('hidden');
+            }
+        }
+
+        async function handleLogout() {
+            try {
+                await fetch('/api/auth/logout', { method: 'POST' });
+                currentUser = null;
+                showAuthModal();
+                updateUserDisplay();
+            } catch (e) {
+                console.error('Logout failed:', e);
+            }
+        }
+
+        function updateUserDisplay() {
+            const userInfo = document.getElementById('user-info');
+            const usernameDisplay = document.getElementById('username-display');
+
+            if (currentUser) {
+                usernameDisplay.textContent = currentUser.display_name || currentUser.username;
+                userInfo.classList.remove('hidden');
+                
+                // Hide logout button in anonymous mode
+                const logoutBtn = userInfo.querySelector('.logout-btn');
+                if (currentUser.is_anonymous) {
+                    logoutBtn.classList.add('hidden');
+                } else {
+                    logoutBtn.classList.remove('hidden');
+                }
+            } else {
+                userInfo.classList.add('hidden');
+            }
+        }
+
+        // ============================================================================
+        // Authenticated Fetch (handles 401s)
+        // ============================================================================
+
+        async function authenticatedFetch(url, options = {}) {
+            const resp = await fetch(url, options);
+            
+            if (resp.status === 401) {
+                // Session expired or not authenticated
+                currentUser = null;
+                showAuthModal();
+                updateUserDisplay();
+                throw new Error('Session expired. Please log in again.');
+            }
+            
+            return resp;
+        }
+
+        // ============================================================================
+        // Initialization
+        // ============================================================================
+
         document.addEventListener('DOMContentLoaded', async () => {
+            // Check auth first
+            const isAuthenticated = await checkAuthStatus();
+            
+            if (isAuthenticated) {
+                initializeApp();
+            }
+        });
+
+        async function initializeApp() {
             await Promise.all([
                 loadDatasets(),
                 loadTokenizerInfo()
@@ -610,7 +987,7 @@
             initLabels();
             initComplexityInputs();
             loadNextExample();
-        });
+        }
 
         async function loadTokenizerInfo() {
             try {
@@ -683,6 +1060,10 @@
             }
         }
 
+        // ============================================================================
+        // Labels
+        // ============================================================================
+
         function renderLabels() {
             const grid = document.getElementById('labels-grid');
             grid.innerHTML = labels.map((label, idx) => {
@@ -738,6 +1119,10 @@
             renderLegend();
         }
 
+        // ============================================================================
+        // Examples
+        // ============================================================================
+
         async function loadNextExample() {
             const dataset = document.getElementById('dataset-select').value;
             const area = document.getElementById('example-area');
@@ -745,7 +1130,7 @@
 
             try {
                 const url = dataset ? `/api/next?dataset=${dataset}` : '/api/next';
-                const resp = await fetch(url);
+                const resp = await authenticatedFetch(url);
                 const data = await resp.json();
 
                 if (data.complete) {
@@ -962,6 +1347,10 @@
             updateWordHighlights();
         }
 
+        // ============================================================================
+        // Save / Skip
+        // ============================================================================
+
         async function saveAndNext() {
             if (!currentExample) return;
 
@@ -1003,7 +1392,7 @@
             });
 
             try {
-                const resp = await fetch('/api/annotate', {
+                const resp = await authenticatedFetch('/api/annotate', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -1028,13 +1417,17 @@
         async function skipExample() {
             if (!currentExample) return;
             try {
-                await fetch(`/api/skip/${currentExample.id}`, { method: 'POST' });
+                await authenticatedFetch(`/api/skip/${currentExample.id}`, { method: 'POST' });
                 showMessage('Skipped', 'success');
                 loadNextExample();
             } catch (e) {
                 showMessage(`Error: ${e.message}`, 'error');
             }
         }
+
+        // ============================================================================
+        // UI Helpers
+        // ============================================================================
 
         function showMessage(text, type) {
             const area = document.getElementById('message-area');
@@ -1055,7 +1448,7 @@
             content.innerHTML = '<div class="loading">Loading stats...</div>';
 
             try {
-                const resp = await fetch('/api/stats');
+                const resp = await authenticatedFetch('/api/stats');
                 const stats = await resp.json();
 
                 let html = `
@@ -1072,6 +1465,17 @@
                         <div class="stat-value">${stats.spans.examples_with_spans}</div>
                     </div>
                 `;
+
+                // User stats if available
+                if (stats.user_stats) {
+                    html += `
+                        <div class="stat-card" style="border-left: 3px solid var(--success);">
+                            <div class="stat-label">Your Annotations</div>
+                            <div class="stat-value">${stats.user_stats.labeled}</div>
+                            <div style="font-size: 0.8rem; color: #aaa;">${stats.user_stats.skipped} skipped</div>
+                        </div>
+                    `;
+                }
 
                 Object.entries(stats.datasets).forEach(([ds, info]) => {
                     const labeled = stats.labeled[ds] || 0;
@@ -1129,7 +1533,7 @@
 
             try {
                 const url = dataset ? `/api/example/${dataset}/${id}` : `/api/example/unknown/${id}`;
-                const resp = await fetch(url);
+                const resp = await authenticatedFetch(url);
 
                 if (!resp.ok) {
                     const err = await resp.json();
@@ -1153,7 +1557,7 @@
 
         async function exportLabels() {
             try {
-                const resp = await fetch('/api/export');
+                const resp = await authenticatedFetch('/api/export');
                 const data = await resp.json();
 
                 const blob = new Blob(
