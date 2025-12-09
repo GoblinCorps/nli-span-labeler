@@ -37,7 +37,7 @@ from contextlib import contextmanager
 from fastapi import FastAPI, HTTPException, Query, Request, Response, Depends, Cookie
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # Tokenizer - using the actual training target model
 from transformers import AutoTokenizer
@@ -60,7 +60,77 @@ TOKENIZER_MODEL = os.environ.get("TOKENIZER_MODEL", "answerdotai/ModernBERT-base
 # Global tokenizer - initialized at startup
 _tokenizer = None
 
-app = FastAPI(title="NLI Span Labeler")
+# ============================================================================
+# API Documentation
+# ============================================================================
+
+API_DESCRIPTION = """
+# NLI Span Labeler API
+
+A multi-user annotation tool for Natural Language Inference (NLI) examples with span-level labeling.
+
+## Features
+
+- **Span-level annotation**: Select specific tokens in premise/hypothesis pairs
+- **Multiple labels per token**: Annotate tokens with multiple semantic labels
+- **Complexity scoring**: Rate examples on 6 difficulty dimensions (1-100 scale)
+- **Multi-user support**: Session-based authentication with per-user annotation tracking
+- **WordPiece tokenization**: Uses ModernBERT tokenizer for model-aligned annotations
+
+## Authentication
+
+Most endpoints require authentication via session cookie. Use the `/api/auth/login` or 
+`/api/auth/register` endpoints to obtain a session.
+
+Set `ANONYMOUS_MODE=1` environment variable to disable authentication for local single-user usage.
+
+## Datasets
+
+Place JSONL files in `data/nli/` directory. Expected format:
+```json
+{"id": "example_1", "premise": "...", "hypothesis": "...", "label": 0, "label_text": "entailment"}
+```
+"""
+
+TAGS_METADATA = [
+    {
+        "name": "Authentication",
+        "description": "User registration, login, logout, and session management.",
+    },
+    {
+        "name": "Examples",
+        "description": "Retrieve NLI examples for annotation. Examples are served per-user to avoid duplicate annotations.",
+    },
+    {
+        "name": "Annotation",
+        "description": "Submit span labels and complexity scores for examples.",
+    },
+    {
+        "name": "Statistics",
+        "description": "View annotation statistics, export data, and manage annotators.",
+    },
+    {
+        "name": "System",
+        "description": "System information endpoints (tokenizer, datasets, health).",
+    },
+]
+
+app = FastAPI(
+    title="NLI Span Labeler API",
+    description=API_DESCRIPTION,
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_tags=TAGS_METADATA,
+    contact={
+        "name": "GoblinCorps",
+        "url": "https://github.com/GoblinCorps/nli-span-labeler",
+    },
+    license_info={
+        "name": "MIT",
+        "url": "https://opensource.org/licenses/MIT",
+    },
+)
 
 # Mount static files
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
@@ -474,54 +544,65 @@ async def get_optional_user(request: Request) -> Optional[dict]:
 # ============================================================================
 
 class SpanSelection(BaseModel):
-    source: str  # 'premise' or 'hypothesis'
-    word_index: int
-    word_text: str
-    char_start: Optional[int] = None
-    char_end: Optional[int] = None
+    """A single span selection within an example."""
+    source: str = Field(..., description="Text source: 'premise' or 'hypothesis'", example="premise")
+    word_index: int = Field(..., description="Token index within the source text", example=3)
+    word_text: str = Field(..., description="The selected token text", example="running")
+    char_start: Optional[int] = Field(None, description="Character start offset in original text")
+    char_end: Optional[int] = Field(None, description="Character end offset in original text")
 
 
 class LabelSubmission(BaseModel):
-    label_name: str
-    label_color: str
-    spans: list[SpanSelection]
+    """A label with its associated span selections."""
+    label_name: str = Field(..., description="Name of the label", example="reasoning")
+    label_color: str = Field(..., description="Hex color for the label", example="#3b82f6")
+    spans: list[SpanSelection] = Field(..., description="List of selected spans for this label")
 
 
 class AnnotationSubmission(BaseModel):
-    example_id: str
-    labels: list[LabelSubmission]
-    complexity_scores: Optional[dict] = None
+    """Complete annotation submission for an example."""
+    example_id: str = Field(..., description="ID of the example being annotated", example="snli_12345")
+    labels: list[LabelSubmission] = Field(..., description="List of labels with span selections")
+    complexity_scores: Optional[dict] = Field(
+        None,
+        description="Complexity scores (1-100) for dimensions: reasoning, creativity, domain_knowledge, contextual, constraints, ambiguity",
+        example={"reasoning": 75, "creativity": 40, "domain_knowledge": 50, "contextual": 60, "constraints": 30, "ambiguity": 45}
+    )
 
 
 class ExampleResponse(BaseModel):
-    id: str
-    dataset: str
-    premise: str
-    hypothesis: str
-    gold_label: Optional[int]
-    gold_label_text: Optional[str]
-    premise_words: list[dict]
-    hypothesis_words: list[dict]
-    existing_labels: list[dict]
-    existing_scores: Optional[dict]
+    """Response containing an NLI example with tokenized text."""
+    id: str = Field(..., description="Unique example identifier")
+    dataset: str = Field(..., description="Source dataset name", example="snli")
+    premise: str = Field(..., description="The premise text")
+    hypothesis: str = Field(..., description="The hypothesis text")
+    gold_label: Optional[int] = Field(None, description="Gold label as integer (0=entailment, 1=neutral, 2=contradiction)")
+    gold_label_text: Optional[str] = Field(None, description="Gold label as text", example="entailment")
+    premise_words: list[dict] = Field(..., description="Tokenized premise with character offsets")
+    hypothesis_words: list[dict] = Field(..., description="Tokenized hypothesis with character offsets")
+    existing_labels: list[dict] = Field(..., description="Previously saved labels for this example (by current user)")
+    existing_scores: Optional[dict] = Field(None, description="Previously saved complexity scores (by current user)")
 
 
 class UserCreate(BaseModel):
-    username: str
-    password: str
-    display_name: Optional[str] = None
+    """Request body for user registration."""
+    username: str = Field(..., min_length=3, description="Username (min 3 characters)", example="annotator1")
+    password: str = Field(..., min_length=6, description="Password (min 6 characters)")
+    display_name: Optional[str] = Field(None, description="Display name (defaults to username)", example="Alice")
 
 
 class UserLogin(BaseModel):
-    username: str
-    password: str
+    """Request body for user login."""
+    username: str = Field(..., description="Username")
+    password: str = Field(..., description="Password")
 
 
 class UserResponse(BaseModel):
-    id: int
-    username: str
-    display_name: Optional[str]
-    is_anonymous: bool = False
+    """Response containing user information."""
+    id: int = Field(..., description="User ID")
+    username: str = Field(..., description="Username")
+    display_name: Optional[str] = Field(None, description="Display name")
+    is_anonymous: bool = Field(False, description="True if running in anonymous mode")
 
 
 # ============================================================================
@@ -587,7 +668,7 @@ def ensure_examples_loaded(dataset: str, limit: int = 500):
 
 
 # ============================================================================
-# API Endpoints - Authentication
+# API Endpoints - Root
 # ============================================================================
 
 @app.on_event("startup")
@@ -601,13 +682,22 @@ async def startup():
         ensure_examples_loaded(dataset, limit=200)
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def root():
     """Serve the main labeling interface."""
     return FileResponse(Path(__file__).parent / "static" / "index.html")
 
 
-@app.post("/api/auth/register")
+# ============================================================================
+# API Endpoints - Authentication
+# ============================================================================
+
+@app.post(
+    "/api/auth/register",
+    tags=["Authentication"],
+    summary="Register a new user",
+    description="Create a new user account. Returns a session cookie on success. Disabled when ANONYMOUS_MODE=1.",
+)
 async def register(user: UserCreate, response: Response):
     """Register a new user."""
     if ANONYMOUS_MODE:
@@ -650,7 +740,12 @@ async def register(user: UserCreate, response: Response):
     return {"status": "registered", "user_id": user_id, "username": user.username}
 
 
-@app.post("/api/auth/login")
+@app.post(
+    "/api/auth/login",
+    tags=["Authentication"],
+    summary="Log in",
+    description="Authenticate with username and password. Returns a session cookie on success.",
+)
 async def login(user: UserLogin, response: Response):
     """Log in a user."""
     if ANONYMOUS_MODE:
@@ -680,7 +775,12 @@ async def login(user: UserLogin, response: Response):
     return {"status": "logged_in", "user_id": user_id, "username": user.username}
 
 
-@app.post("/api/auth/logout")
+@app.post(
+    "/api/auth/logout",
+    tags=["Authentication"],
+    summary="Log out",
+    description="Invalidate the current session and clear the session cookie.",
+)
 async def logout(request: Request, response: Response):
     """Log out the current user."""
     token = request.cookies.get("session")
@@ -690,7 +790,13 @@ async def logout(request: Request, response: Response):
     return {"status": "logged_out"}
 
 
-@app.get("/api/me")
+@app.get(
+    "/api/me",
+    tags=["Authentication"],
+    summary="Get current user",
+    description="Get information about the currently authenticated user.",
+    response_model=UserResponse,
+)
 async def get_me(user: dict = Depends(get_optional_user)):
     """Get current user info."""
     if user:
@@ -703,7 +809,12 @@ async def get_me(user: dict = Depends(get_optional_user)):
     return {"authenticated": False, "anonymous_mode": ANONYMOUS_MODE}
 
 
-@app.get("/api/auth/status")
+@app.get(
+    "/api/auth/status",
+    tags=["Authentication"],
+    summary="Get auth status",
+    description="Check if the server is running in anonymous mode and whether registration is enabled.",
+)
 async def auth_status():
     """Get authentication status and mode."""
     return {
@@ -712,7 +823,16 @@ async def auth_status():
     }
 
 
-@app.get("/api/tokenizer/info")
+# ============================================================================
+# API Endpoints - System
+# ============================================================================
+
+@app.get(
+    "/api/tokenizer/info",
+    tags=["System"],
+    summary="Get tokenizer info",
+    description="Get information about the tokenizer used for text segmentation. The tokenizer matches the target model (ModernBERT by default).",
+)
 async def tokenizer_info():
     """Get information about the tokenizer being used."""
     tokenizer = get_tokenizer()
@@ -723,11 +843,12 @@ async def tokenizer_info():
     }
 
 
-# ============================================================================
-# API Endpoints - Datasets and Examples
-# ============================================================================
-
-@app.get("/api/datasets")
+@app.get(
+    "/api/datasets",
+    tags=["System"],
+    summary="List available datasets",
+    description="List all available NLI datasets. Datasets are detected from JSONL files in the data/nli directory.",
+)
 async def list_datasets():
     """List available datasets."""
     files = list(DATA_DIR.glob("*.jsonl"))
@@ -739,7 +860,17 @@ async def list_datasets():
     return {"datasets": sorted(datasets)}
 
 
-@app.get("/api/example/{dataset}/{row_id}")
+# ============================================================================
+# API Endpoints - Examples
+# ============================================================================
+
+@app.get(
+    "/api/example/{dataset}/{row_id}",
+    tags=["Examples"],
+    summary="Get specific example",
+    description="Retrieve a specific example by dataset and ID. Returns the tokenized text and any existing annotations by the current user.",
+    response_model=ExampleResponse,
+)
 async def get_example(
     dataset: str, 
     row_id: str,
@@ -826,9 +957,15 @@ async def get_example(
         )
 
 
-@app.get("/api/next")
+@app.get(
+    "/api/next",
+    tags=["Examples"],
+    summary="Get next unlabeled example",
+    description="Get a random unlabeled example for the current user. Optionally filter by dataset. Returns complete=true when all examples have been labeled.",
+    response_model=ExampleResponse,
+)
 async def get_next_example(
-    dataset: Optional[str] = None,
+    dataset: Optional[str] = Query(None, description="Filter by dataset name"),
     user: dict = Depends(get_current_user)
 ):
     """Get the next unlabeled example for the current user."""
@@ -874,7 +1011,16 @@ async def get_next_example(
         )
 
 
-@app.post("/api/annotate")
+# ============================================================================
+# API Endpoints - Annotation
+# ============================================================================
+
+@app.post(
+    "/api/annotate",
+    tags=["Annotation"],
+    summary="Save annotation",
+    description="Save span labels and complexity scores for an example. Replaces any existing annotation by the current user for this example.",
+)
 async def save_annotation(
     submission: AnnotationSubmission,
     user: dict = Depends(get_current_user)
@@ -945,7 +1091,12 @@ async def save_annotation(
         return {"status": "saved", "example_id": submission.example_id, "annotator_id": user_id}
 
 
-@app.post("/api/skip/{example_id}")
+@app.post(
+    "/api/skip/{example_id}",
+    tags=["Annotation"],
+    summary="Skip example",
+    description="Mark an example as skipped. Skipped examples won't appear in /api/next for the current user.",
+)
 async def skip_example(
     example_id: str,
     user: dict = Depends(get_current_user)
@@ -961,7 +1112,16 @@ async def skip_example(
         return {"status": "skipped", "example_id": example_id, "annotator_id": user_id}
 
 
-@app.get("/api/stats")
+# ============================================================================
+# API Endpoints - Statistics
+# ============================================================================
+
+@app.get(
+    "/api/stats",
+    tags=["Statistics"],
+    summary="Get statistics",
+    description="Get annotation statistics including per-dataset counts, label distribution, complexity score averages, and per-annotator stats.",
+)
 async def get_stats(user: dict = Depends(get_optional_user)):
     """Get labeling statistics."""
     user_id = user["id"] if user else None
@@ -1085,7 +1245,12 @@ async def get_stats(user: dict = Depends(get_optional_user)):
         }
 
 
-@app.get("/api/export")
+@app.get(
+    "/api/export",
+    tags=["Statistics"],
+    summary="Export annotations",
+    description="Export all annotations as JSONL format. Includes annotator information, complexity scores, and span labels.",
+)
 async def export_labels():
     """Export all labels as JSONL with annotator information."""
     with get_db() as conn:
@@ -1151,7 +1316,12 @@ async def export_labels():
         return {"count": len(results), "data": results, "tokenizer": TOKENIZER_MODEL}
 
 
-@app.get("/api/users")
+@app.get(
+    "/api/users",
+    tags=["Statistics"],
+    summary="List annotators",
+    description="List all registered annotators with their annotation counts. Excludes system users (anonymous, legacy).",
+)
 async def list_users(user: dict = Depends(get_current_user)):
     """List all annotators (for admin purposes)."""
     with get_db() as conn:
