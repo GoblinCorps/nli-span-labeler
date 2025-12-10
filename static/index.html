@@ -1715,6 +1715,7 @@
             <button class="nav-tab admin-only hidden" data-tab="admin" id="admin-tab-btn" onclick="switchTab('admin')">📊 Admin Dashboard</button>
             <button class="nav-tab admin-only hidden" data-tab="quality-review" onclick="switchTab('quality-review')">🔍 Quality Review</button>
             <button class="nav-tab admin-only hidden" data-tab="gold-examples" onclick="switchTab('gold-examples')">📚 Gold Examples</button>
+            <button class="nav-tab admin-only hidden" data-tab="flagged" onclick="switchTab('flagged')">🚩 Flagged</button>
         </div>
 
         <!-- Training Mode Overlay -->
@@ -1831,10 +1832,26 @@
 
             <!-- Actions -->
             <div class="actions">
-                <button class="btn btn-warning" onclick="skipExample()">Skip <span style="opacity: 0.6; font-size: 0.8em;">(Esc)</span></button>
+                <div>
+                    <button class="btn btn-warning" onclick="skipExample()">Skip <span style="opacity: 0.6; font-size: 0.8em;">(Esc)</span></button>
+                    <button class="btn" style="background: #e63946; color: white;" onclick="showFlagModal()">🚩 Flag</button>
+                </div>
                 <div>
                     <button class="btn btn-secondary" onclick="clearSelections()">Clear All <span style="opacity: 0.6; font-size: 0.8em;">(c)</span></button>
                     <button class="btn btn-success" onclick="saveAndNext()">Save & Next <span style="opacity: 0.6; font-size: 0.8em;">(Enter)</span></button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Flag Modal -->
+        <div id="flag-modal" class="hidden" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; display: flex; align-items: center; justify-content: center;">
+            <div class="card" style="max-width: 500px; margin: 20px;">
+                <h3 style="margin-bottom: 15px;">🚩 Flag Example for Review</h3>
+                <p style="color: var(--text-secondary); margin-bottom: 15px;">What's unusual about this example?</p>
+                <textarea id="flag-reason" style="width: 100%; min-height: 100px; padding: 10px; background: #1a1a2e; border: 1px solid #444; border-radius: 6px; color: #eee; resize: vertical;" placeholder="e.g., Ambiguous wording, unclear relationship, possible labeling error..."></textarea>
+                <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 15px;">
+                    <button class="btn btn-secondary" onclick="closeFlagModal()">Cancel</button>
+                    <button class="btn" style="background: #e63946; color: white;" onclick="submitFlag()">Submit Flag</button>
                 </div>
             </div>
         </div>
@@ -2043,6 +2060,78 @@
 
             <div id="gold-examples-list">
                 <div class="loading">Loading gold examples...</div>
+            </div>
+        </div>
+
+        <!-- Flagged Examples Tab (Admin Only) -->
+        <div id="flagged-tab" class="tab-content hidden">
+            <div class="card">
+                <h3 style="margin-bottom: 15px;">🚩 Flagged Examples</h3>
+                <p style="color: var(--text-secondary); margin-bottom: 20px;">
+                    Review flagged examples - both auto-flagged (low agreement) and manually flagged by annotators.
+                </p>
+
+                <!-- Stats Summary -->
+                <div id="flagged-stats" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 15px; margin-bottom: 20px;">
+                    <div class="stat-card">
+                        <div class="stat-value" id="flagged-total">-</div>
+                        <div class="stat-label">Total Flagged</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="flagged-pending">-</div>
+                        <div class="stat-label">Pending</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="flagged-auto">-</div>
+                        <div class="stat-label">Auto-flagged</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="flagged-manual">-</div>
+                        <div class="stat-label">Manual</div>
+                    </div>
+                </div>
+
+                <!-- Filters -->
+                <div style="display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap;">
+                    <select id="flagged-status-filter" onchange="loadFlaggedExamples()" style="padding: 10px; background: #1a1a2e; border: 1px solid #444; border-radius: 6px; color: #eee;">
+                        <option value="">All statuses</option>
+                        <option value="pending">Pending</option>
+                        <option value="reviewed">Reviewed</option>
+                        <option value="resolved">Resolved</option>
+                        <option value="excluded">Excluded</option>
+                    </select>
+                    <select id="flagged-source-filter" onchange="loadFlaggedExamples()" style="padding: 10px; background: #1a1a2e; border: 1px solid #444; border-radius: 6px; color: #eee;">
+                        <option value="">All sources</option>
+                        <option value="auto">Auto-flagged</option>
+                        <option value="manual">Manual</option>
+                    </select>
+                    <button class="btn btn-secondary" onclick="loadFlaggedExamples()">🔄 Refresh</button>
+                </div>
+
+                <!-- Flagged List -->
+                <div id="flagged-list">
+                    <p style="color: var(--text-secondary); text-align: center;">Loading flagged examples...</p>
+                </div>
+
+                <!-- Pagination -->
+                <div id="flagged-pagination" class="hidden" style="margin-top: 20px; display: flex; justify-content: center; gap: 10px;">
+                    <button class="btn btn-secondary" onclick="loadFlaggedExamples(flaggedCurrentOffset - 50)" id="flagged-prev-btn">← Previous</button>
+                    <span id="flagged-page-info" style="padding: 10px; color: var(--text-secondary);"></span>
+                    <button class="btn btn-secondary" onclick="loadFlaggedExamples(flaggedCurrentOffset + 50)" id="flagged-next-btn">Next →</button>
+                </div>
+            </div>
+
+            <!-- Flag Detail Modal -->
+            <div id="flag-detail-modal" class="hidden" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; display: flex; align-items: center; justify-content: center;">
+                <div class="card" style="max-width: 900px; max-height: 90vh; overflow-y: auto; margin: 20px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                        <h3>🚩 Flagged Example Detail</h3>
+                        <button class="btn btn-secondary" onclick="closeFlagDetailModal()">×</button>
+                    </div>
+                    <div id="flag-detail-content"></div>
+                    <div id="flag-detail-actions" style="margin-top: 20px; display: flex; gap: 10px; flex-wrap: wrap;">
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -3005,6 +3094,78 @@
                 showMessage(`Error: ${e.message}`, 'error');
             }
         }
+
+        // ============================================================================
+        // Flagging Functions
+        // ============================================================================
+
+        function showFlagModal() {
+            if (!currentExample) {
+                showMessage('No example loaded', 'error');
+                return;
+            }
+            document.getElementById('flag-reason').value = '';
+            const modal = document.getElementById('flag-modal');
+            modal.classList.remove('hidden');
+            modal.style.display = 'flex';
+            document.getElementById('flag-reason').focus();
+        }
+
+        function closeFlagModal() {
+            const modal = document.getElementById('flag-modal');
+            modal.classList.add('hidden');
+            modal.style.display = 'none';
+        }
+
+        async function submitFlag() {
+            const reason = document.getElementById('flag-reason').value.trim();
+            if (!reason) {
+                showMessage('Please provide a reason for flagging', 'error');
+                return;
+            }
+            if (!currentExample) {
+                showMessage('No example loaded', 'error');
+                return;
+            }
+
+            try {
+                const resp = await authenticatedFetch('/api/flag', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        example_id: currentExample.id,
+                        reason: reason
+                    })
+                });
+
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    throw new Error(err.detail || 'Failed to flag example');
+                }
+
+                closeFlagModal();
+                showMessage('Example flagged for review', 'success');
+            } catch (e) {
+                showMessage(`Error: ${e.message}`, 'error');
+            }
+        }
+
+        // Close flag modal on escape
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                const flagModal = document.getElementById('flag-modal');
+                if (flagModal && !flagModal.classList.contains('hidden')) {
+                    closeFlagModal();
+                }
+            }
+        });
+
+        // Close flag modal on backdrop click
+        document.getElementById('flag-modal')?.addEventListener('click', function(e) {
+            if (e.target === this) {
+                closeFlagModal();
+            }
+        });
 
         // ============================================================================
         // UI Helpers
@@ -4241,6 +4402,270 @@
             await originalOnLoginSuccess(user);
             checkTrainingStatus();
         };
+
+        // ============================================================================
+        // Flagged Examples Functions (Admin Only)
+        // ============================================================================
+
+        let flaggedCurrentOffset = 0;
+        let flaggedCurrentData = null;
+        let currentFlagId = null;
+
+        async function loadFlaggedExamples(offset = 0) {
+            flaggedCurrentOffset = Math.max(0, offset);
+            const status = document.getElementById('flagged-status-filter').value;
+            const source = document.getElementById('flagged-source-filter').value;
+
+            let url = `/api/admin/flagged?limit=50&offset=${flaggedCurrentOffset}`;
+            if (status) url += `&status=${status}`;
+            if (source) url += `&source=${source}`;
+
+            const listEl = document.getElementById('flagged-list');
+            listEl.innerHTML = '<p style="color: var(--text-secondary); text-align: center;">Loading...</p>';
+
+            try {
+                const resp = await authenticatedFetch(url);
+                if (!resp.ok) {
+                    listEl.innerHTML = '<p style="color: var(--error);">Error loading flagged examples.</p>';
+                    return;
+                }
+
+                const data = await resp.json();
+                flaggedCurrentData = data;
+
+                // Update stats
+                document.getElementById('flagged-total').textContent = data.stats.total;
+                document.getElementById('flagged-pending').textContent = data.stats.pending;
+                document.getElementById('flagged-auto').textContent = data.stats.auto_flagged;
+                document.getElementById('flagged-manual').textContent = data.stats.manual_flagged;
+
+                // Render list
+                renderFlaggedList(data);
+
+                // Update pagination
+                const pagination = document.getElementById('flagged-pagination');
+                const pageInfo = document.getElementById('flagged-page-info');
+                const prevBtn = document.getElementById('flagged-prev-btn');
+                const nextBtn = document.getElementById('flagged-next-btn');
+
+                if (data.total > 0) {
+                    pagination.classList.remove('hidden');
+                    const startNum = flaggedCurrentOffset + 1;
+                    const endNum = Math.min(flaggedCurrentOffset + data.flagged.length, data.total);
+                    pageInfo.textContent = `${startNum}-${endNum} of ${data.total}`;
+                    prevBtn.disabled = flaggedCurrentOffset === 0;
+                    nextBtn.disabled = flaggedCurrentOffset + 50 >= data.total;
+                } else {
+                    pagination.classList.add('hidden');
+                }
+            } catch (e) {
+                listEl.innerHTML = `<p style="color: var(--error);">Error: ${e.message}</p>`;
+            }
+        }
+
+        function renderFlaggedList(data) {
+            const listEl = document.getElementById('flagged-list');
+
+            if (!data.flagged || data.flagged.length === 0) {
+                listEl.innerHTML = '<p style="color: var(--text-secondary); text-align: center;">No flagged examples found.</p>';
+                return;
+            }
+
+            let html = '<div style="display: flex; flex-direction: column; gap: 10px;">';
+
+            for (const flag of data.flagged) {
+                const isAuto = flag.flag_source === 'auto';
+                const statusColors = {
+                    pending: '#f4a261',
+                    reviewed: '#3a86ff',
+                    resolved: '#2a9d8f',
+                    excluded: '#888'
+                };
+                const statusColor = statusColors[flag.status] || '#888';
+
+                html += `
+                <div style="background: rgba(255,255,255,0.02); border: 1px solid #333; border-radius: 8px; padding: 15px; cursor: pointer;" onclick="showFlagDetail(${flag.id})">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 10px; flex-wrap: wrap; gap: 10px;">
+                        <span style="font-family: monospace; color: var(--text-secondary);">${flag.example_id}</span>
+                        <div style="display: flex; gap: 10px;">
+                            <span style="background: ${isAuto ? '#e63946' : '#3a86ff'}; padding: 2px 8px; border-radius: 3px; font-size: 12px;">${isAuto ? 'Auto' : 'Manual'}</span>
+                            <span style="background: ${statusColor}; padding: 2px 8px; border-radius: 3px; font-size: 12px;">${flag.status}</span>
+                        </div>
+                    </div>
+                    <div style="font-size: 13px; color: #ccc; margin-bottom: 10px;">
+                        <strong>Reason:</strong> ${escapeHtml(flag.flag_reason || 'No reason provided')}
+                    </div>
+                    <div style="font-size: 12px; color: #888;">
+                        ${flag.flagger_username ? `Flagged by ${flag.flagger_username}` : 'System flagged'} • ${flag.dataset || 'Unknown dataset'} • ${new Date(flag.flagged_at).toLocaleDateString()}
+                        ${flag.agreement_score !== null ? ` • Agreement: ${(flag.agreement_score * 100).toFixed(0)}%` : ''}
+                    </div>
+                </div>`;
+            }
+
+            html += '</div>';
+            listEl.innerHTML = html;
+        }
+
+        async function showFlagDetail(flagId) {
+            currentFlagId = flagId;
+            try {
+                const resp = await authenticatedFetch(`/api/admin/flagged/${flagId}`);
+                if (!resp.ok) {
+                    showMessage('Error loading flag details', 'error');
+                    return;
+                }
+
+                const data = await resp.json();
+                const flag = data.flag;
+                const annotations = data.annotations;
+
+                const content = document.getElementById('flag-detail-content');
+                content.innerHTML = `
+                    <div style="margin-bottom: 20px;">
+                        <div style="color: var(--text-secondary); margin-bottom: 5px;">Example ID</div>
+                        <div style="font-family: monospace;">${flag.example_id}</div>
+                    </div>
+
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
+                        <div>
+                            <div style="color: var(--text-secondary); margin-bottom: 5px;">Status</div>
+                            <div>${flag.status}</div>
+                        </div>
+                        <div>
+                            <div style="color: var(--text-secondary); margin-bottom: 5px;">Source</div>
+                            <div>${flag.flag_source === 'auto' ? 'Auto-flagged' : 'Manual'}</div>
+                        </div>
+                    </div>
+
+                    <div style="margin-bottom: 20px;">
+                        <div style="color: var(--text-secondary); margin-bottom: 5px;">Reason</div>
+                        <div style="background: rgba(230, 57, 70, 0.1); border: 1px solid #e63946; padding: 10px; border-radius: 6px;">
+                            ${escapeHtml(flag.flag_reason || 'No reason provided')}
+                        </div>
+                    </div>
+
+                    <div style="margin-bottom: 20px;">
+                        <div style="color: var(--text-secondary); margin-bottom: 5px;">Premise</div>
+                        <div style="background: rgba(255,255,255,0.05); padding: 10px; border-radius: 6px;">${escapeHtml(flag.premise || '')}</div>
+                    </div>
+
+                    <div style="margin-bottom: 20px;">
+                        <div style="color: var(--text-secondary); margin-bottom: 5px;">Hypothesis</div>
+                        <div style="background: rgba(255,255,255,0.05); padding: 10px; border-radius: 6px;">${escapeHtml(flag.hypothesis || '')}</div>
+                    </div>
+
+                    ${annotations.length > 0 ? `
+                    <div style="margin-bottom: 20px;">
+                        <div style="color: var(--text-secondary); margin-bottom: 10px;">Annotations (${annotations.length})</div>
+                        <div style="display: flex; flex-direction: column; gap: 10px;">
+                            ${annotations.map(a => `
+                                <div style="background: rgba(255,255,255,0.03); padding: 10px; border-radius: 6px;">
+                                    <strong>${a.display_name || a.username}</strong>:
+                                    ${a.labels ? a.labels.split(',').map(l => `<span style="background: #3a86ff; padding: 2px 6px; border-radius: 3px; margin: 2px; font-size: 12px;">${l}</span>`).join('') : '<span style="color: #888;">No labels</span>'}
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                    ` : ''}
+
+                    ${flag.resolution ? `
+                    <div style="margin-bottom: 20px;">
+                        <div style="color: var(--text-secondary); margin-bottom: 5px;">Resolution</div>
+                        <div style="background: rgba(42, 157, 143, 0.1); border: 1px solid #2a9d8f; padding: 10px; border-radius: 6px;">
+                            ${escapeHtml(flag.resolution)}
+                        </div>
+                    </div>
+                    ` : ''}
+                `;
+
+                // Update actions based on status
+                const actions = document.getElementById('flag-detail-actions');
+                if (flag.status === 'pending') {
+                    actions.innerHTML = `
+                        <button class="btn btn-secondary" onclick="updateFlagStatus(${flagId}, 'reviewed')">Mark Reviewed</button>
+                        <button class="btn btn-success" onclick="promptResolution(${flagId}, 'resolved')">Resolve</button>
+                        <button class="btn" style="background: #888; color: white;" onclick="promptResolution(${flagId}, 'excluded')">Exclude from Export</button>
+                    `;
+                } else if (flag.status === 'reviewed') {
+                    actions.innerHTML = `
+                        <button class="btn btn-success" onclick="promptResolution(${flagId}, 'resolved')">Resolve</button>
+                        <button class="btn" style="background: #888; color: white;" onclick="promptResolution(${flagId}, 'excluded')">Exclude from Export</button>
+                        <button class="btn btn-secondary" onclick="updateFlagStatus(${flagId}, 'pending')">Back to Pending</button>
+                    `;
+                } else {
+                    actions.innerHTML = `
+                        <button class="btn btn-secondary" onclick="updateFlagStatus(${flagId}, 'pending')">Reopen</button>
+                    `;
+                }
+
+                const modal = document.getElementById('flag-detail-modal');
+                modal.classList.remove('hidden');
+                modal.style.display = 'flex';
+            } catch (e) {
+                showMessage(`Error: ${e.message}`, 'error');
+            }
+        }
+
+        function closeFlagDetailModal() {
+            const modal = document.getElementById('flag-detail-modal');
+            modal.classList.add('hidden');
+            modal.style.display = 'none';
+            currentFlagId = null;
+        }
+
+        async function updateFlagStatus(flagId, status, resolution = null) {
+            try {
+                const resp = await authenticatedFetch(`/api/admin/flagged/${flagId}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status, resolution })
+                });
+
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    throw new Error(err.detail || 'Failed to update status');
+                }
+
+                showMessage(`Status updated to ${status}`, 'success');
+                closeFlagDetailModal();
+                loadFlaggedExamples(flaggedCurrentOffset);
+            } catch (e) {
+                showMessage(`Error: ${e.message}`, 'error');
+            }
+        }
+
+        function promptResolution(flagId, status) {
+            const resolution = prompt('Enter resolution notes (optional):');
+            if (resolution !== null) {
+                updateFlagStatus(flagId, status, resolution || null);
+            }
+        }
+
+        // Initialize flagged tab when switched to
+        const originalSwitchTab2 = switchTab;
+        switchTab = function(tabName) {
+            originalSwitchTab2(tabName);
+            if (tabName === 'flagged') {
+                loadFlaggedExamples();
+            }
+        };
+
+        // Close flag detail modal on escape
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                const modal = document.getElementById('flag-detail-modal');
+                if (modal && !modal.classList.contains('hidden')) {
+                    closeFlagDetailModal();
+                }
+            }
+        });
+
+        // Close flag detail modal on backdrop click
+        document.getElementById('flag-detail-modal')?.addEventListener('click', function(e) {
+            if (e.target === this) {
+                closeFlagDetailModal();
+            }
+        });
     </script>
 </body>
 </html>

@@ -34,6 +34,7 @@ Environment Variables:
     CALIBRATION_ROUTING_ENABLED=1  - Enable stealth calibration routing (default: 1)
     CALIBRATION_TEST_RATIO_NEW=0.8  - Test question ratio for new/provisional users (default: 0.8)
     CALIBRATION_TEST_RATIO_ESTABLISHED=0.1  - Test question ratio for calibrated users (default: 0.1)
+    CONTROVERSIAL_THRESHOLD=0.5  - Auto-flag examples with agreement below this (default: 0.5)
 """
 
 import json
@@ -94,6 +95,9 @@ CALIBRATION_TEST_RATIO_ESTABLISHED = float(os.environ.get("CALIBRATION_TEST_RATI
 # Training configuration
 TRAINING_ENABLED = os.environ.get("TRAINING_ENABLED", "1") == "1"
 TRAINING_MIN_EXAMPLES = int(os.environ.get("TRAINING_MIN_EXAMPLES", "5"))  # Gold examples required to complete training
+
+# Controversial example flagging configuration
+CONTROVERSIAL_THRESHOLD = float(os.environ.get("CONTROVERSIAL_THRESHOLD", "0.5"))  # Auto-flag when agreement below this
 
 # ============================================================================
 # Label Schema Configuration
@@ -559,12 +563,31 @@ def init_db():
                     UNIQUE(example_id, annotator_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS flagged_examples (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    example_id TEXT NOT NULL,
+                    flagged_by INTEGER,
+                    flag_source TEXT NOT NULL DEFAULT 'manual',
+                    flag_reason TEXT,
+                    agreement_score REAL,
+                    flagged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    resolution TEXT,
+                    resolved_by INTEGER,
+                    resolved_at TIMESTAMP,
+                    FOREIGN KEY (example_id) REFERENCES examples(id),
+                    FOREIGN KEY (flagged_by) REFERENCES users(id),
+                    FOREIGN KEY (resolved_by) REFERENCES users(id)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_labels_example ON labels(example_id);
                 CREATE INDEX IF NOT EXISTS idx_labels_annotator ON labels(annotator_id);
                 CREATE INDEX IF NOT EXISTS idx_labels_custom ON labels(is_custom);
                 CREATE INDEX IF NOT EXISTS idx_spans_label ON span_selections(label_id);
                 CREATE INDEX IF NOT EXISTS idx_complexity_annotator ON complexity_scores(annotator_id);
                 CREATE INDEX IF NOT EXISTS idx_skipped_annotator ON skipped(annotator_id);
+                CREATE INDEX IF NOT EXISTS idx_flagged_example ON flagged_examples(example_id);
+                CREATE INDEX IF NOT EXISTS idx_flagged_status ON flagged_examples(status);
             """)
 
         # Create gold annotations table for training mode
@@ -1047,10 +1070,14 @@ def update_example_agreement(conn, example_id: str):
             last_calculated = CURRENT_TIMESTAMP
     """, (example_id, metrics['annotation_count'], metrics['agreement_score'],
           metrics['complexity_agreement'], metrics['span_agreement']))
-    
+
     # Update pool status
     update_example_pool_status(conn, example_id, metrics)
-    
+
+    # Auto-flag if agreement is below controversial threshold
+    if metrics['agreement_score'] is not None and metrics['annotation_count'] >= CONSENSUS_THRESHOLD:
+        auto_flag_controversial(conn, example_id, metrics['agreement_score'])
+
     return metrics
 
 
@@ -3075,6 +3102,247 @@ async def admin_get_user_disagreements(
             "disagreements": results[:limit],
             "total": len(results)
         }
+
+
+# ============================================================================
+# API Endpoints - Flagging
+# ============================================================================
+
+@app.post(
+    "/api/flag",
+    tags=["Annotation"],
+    summary="Flag an example for review",
+    description="Flag an example as controversial or needing review. Any authenticated user can flag.",
+)
+async def flag_example(
+    example_id: str = Body(..., embed=True, description="Example ID to flag"),
+    reason: str = Body(..., embed=True, description="Reason for flagging"),
+    user: dict = Depends(get_current_user)
+):
+    """Flag an example for review."""
+    with get_db() as conn:
+        # Verify example exists
+        example = conn.execute(
+            "SELECT id FROM examples WHERE id = ?", (example_id,)
+        ).fetchone()
+
+        if not example:
+            raise HTTPException(404, f"Example not found: {example_id}")
+
+        # Check if already flagged by this user
+        existing = conn.execute(
+            "SELECT id FROM flagged_examples WHERE example_id = ? AND flagged_by = ?",
+            (example_id, user["id"])
+        ).fetchone()
+
+        if existing:
+            raise HTTPException(400, "You have already flagged this example")
+
+        # Insert flag
+        conn.execute("""
+            INSERT INTO flagged_examples (example_id, flagged_by, flag_source, flag_reason)
+            VALUES (?, ?, 'manual', ?)
+        """, (example_id, user["id"], reason))
+
+        return {"status": "flagged", "example_id": example_id}
+
+
+@app.get(
+    "/api/admin/flagged",
+    tags=["Admin"],
+    summary="Get flagged examples (admin)",
+    description="Get list of flagged examples with filtering options.",
+)
+async def admin_get_flagged_examples(
+    status: Optional[str] = Query(None, description="Filter by status: pending, reviewed, resolved, excluded"),
+    source: Optional[str] = Query(None, description="Filter by source: manual, auto"),
+    dataset: Optional[str] = Query(None, description="Filter by dataset"),
+    limit: int = Query(50, ge=1, le=200, description="Max results"),
+    offset: int = Query(0, ge=0, description="Offset for pagination"),
+    admin: dict = Depends(require_admin)
+):
+    """Get flagged examples with filters."""
+    with get_db() as conn:
+        # Build query
+        conditions = []
+        params = []
+
+        if status:
+            conditions.append("f.status = ?")
+            params.append(status)
+
+        if source:
+            conditions.append("f.flag_source = ?")
+            params.append(source)
+
+        if dataset:
+            conditions.append("e.dataset = ?")
+            params.append(dataset)
+
+        where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+        # Get total count
+        total = conn.execute(f"""
+            SELECT COUNT(*) FROM flagged_examples f
+            JOIN examples e ON f.example_id = e.id
+            WHERE {where_clause}
+        """, params).fetchone()[0]
+
+        # Get flagged examples
+        results = conn.execute(f"""
+            SELECT f.id, f.example_id, f.flagged_by, f.flag_source, f.flag_reason,
+                   f.agreement_score, f.flagged_at, f.status, f.resolution,
+                   f.resolved_by, f.resolved_at,
+                   e.premise, e.hypothesis, e.dataset,
+                   u.username as flagger_username
+            FROM flagged_examples f
+            JOIN examples e ON f.example_id = e.id
+            LEFT JOIN users u ON f.flagged_by = u.id
+            WHERE {where_clause}
+            ORDER BY f.flagged_at DESC
+            LIMIT ? OFFSET ?
+        """, params + [limit, offset]).fetchall()
+
+        # Get summary stats
+        stats = conn.execute("""
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+                SUM(CASE WHEN status = 'reviewed' THEN 1 ELSE 0 END) as reviewed,
+                SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END) as resolved,
+                SUM(CASE WHEN status = 'excluded' THEN 1 ELSE 0 END) as excluded,
+                SUM(CASE WHEN flag_source = 'auto' THEN 1 ELSE 0 END) as auto_flagged,
+                SUM(CASE WHEN flag_source = 'manual' THEN 1 ELSE 0 END) as manual_flagged
+            FROM flagged_examples
+        """).fetchone()
+
+        return {
+            "flagged": [dict(row) for row in results],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "stats": {
+                "total": stats["total"] or 0,
+                "pending": stats["pending"] or 0,
+                "reviewed": stats["reviewed"] or 0,
+                "resolved": stats["resolved"] or 0,
+                "excluded": stats["excluded"] or 0,
+                "auto_flagged": stats["auto_flagged"] or 0,
+                "manual_flagged": stats["manual_flagged"] or 0
+            }
+        }
+
+
+@app.get(
+    "/api/admin/flagged/{flag_id}",
+    tags=["Admin"],
+    summary="Get single flagged example details (admin)",
+    description="Get detailed information about a specific flagged example.",
+)
+async def admin_get_flagged_example(
+    flag_id: int,
+    admin: dict = Depends(require_admin)
+):
+    """Get details of a single flagged example."""
+    with get_db() as conn:
+        flag = conn.execute("""
+            SELECT f.*, e.premise, e.hypothesis, e.dataset,
+                   u1.username as flagger_username,
+                   u2.username as resolver_username
+            FROM flagged_examples f
+            JOIN examples e ON f.example_id = e.id
+            LEFT JOIN users u1 ON f.flagged_by = u1.id
+            LEFT JOIN users u2 ON f.resolved_by = u2.id
+            WHERE f.id = ?
+        """, (flag_id,)).fetchone()
+
+        if not flag:
+            raise HTTPException(404, f"Flagged example not found: {flag_id}")
+
+        # Get all annotations for this example
+        annotations = conn.execute("""
+            SELECT u.username, u.display_name,
+                   GROUP_CONCAT(DISTINCT l.label_name) as labels,
+                   cs.reasoning, cs.creativity, cs.domain_knowledge,
+                   cs.contextual, cs.constraints, cs.ambiguity
+            FROM complexity_scores cs
+            JOIN users u ON cs.annotator_id = u.id
+            LEFT JOIN labels l ON l.example_id = cs.example_id AND l.annotator_id = cs.annotator_id
+            WHERE cs.example_id = ?
+            GROUP BY cs.id
+        """, (flag["example_id"],)).fetchall()
+
+        return {
+            "flag": dict(flag),
+            "annotations": [dict(a) for a in annotations]
+        }
+
+
+@app.put(
+    "/api/admin/flagged/{flag_id}",
+    tags=["Admin"],
+    summary="Update flagged example status (admin)",
+    description="Update the status and resolution of a flagged example.",
+)
+async def admin_update_flagged_example(
+    flag_id: int,
+    status: str = Body(..., embed=True, description="New status: pending, reviewed, resolved, excluded"),
+    resolution: Optional[str] = Body(None, embed=True, description="Resolution notes"),
+    admin: dict = Depends(require_admin)
+):
+    """Update status of a flagged example."""
+    valid_statuses = ["pending", "reviewed", "resolved", "excluded"]
+    if status not in valid_statuses:
+        raise HTTPException(400, f"Invalid status. Must be one of: {valid_statuses}")
+
+    with get_db() as conn:
+        # Check flag exists
+        flag = conn.execute(
+            "SELECT id FROM flagged_examples WHERE id = ?", (flag_id,)
+        ).fetchone()
+
+        if not flag:
+            raise HTTPException(404, f"Flagged example not found: {flag_id}")
+
+        # Update status
+        if status in ["resolved", "excluded"]:
+            conn.execute("""
+                UPDATE flagged_examples
+                SET status = ?, resolution = ?, resolved_by = ?, resolved_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (status, resolution, admin["id"], flag_id))
+        else:
+            conn.execute("""
+                UPDATE flagged_examples
+                SET status = ?, resolution = ?
+                WHERE id = ?
+            """, (status, resolution, flag_id))
+
+        return {"status": "updated", "flag_id": flag_id, "new_status": status}
+
+
+def auto_flag_controversial(conn, example_id: str, agreement_score: float):
+    """Auto-flag an example if agreement is below threshold."""
+    if agreement_score >= CONTROVERSIAL_THRESHOLD:
+        return False
+
+    # Check if already auto-flagged
+    existing = conn.execute(
+        "SELECT id FROM flagged_examples WHERE example_id = ? AND flag_source = 'auto'",
+        (example_id,)
+    ).fetchone()
+
+    if existing:
+        return False  # Already flagged
+
+    # Auto-flag
+    reason = f"Low agreement score: {agreement_score:.2f} (threshold: {CONTROVERSIAL_THRESHOLD})"
+    conn.execute("""
+        INSERT INTO flagged_examples (example_id, flag_source, flag_reason, agreement_score)
+        VALUES (?, 'auto', ?, ?)
+    """, (example_id, reason, agreement_score))
+
+    return True
 
 
 # ============================================================================
