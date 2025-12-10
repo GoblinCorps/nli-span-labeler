@@ -29,6 +29,7 @@ Environment Variables:
     LOCK_TIMEOUT_MINUTES=30  - How long example locks last (default: 30)
     ADMIN_USER=username  - Bootstrap admin user (gets admin role on startup)
     CONSENSUS_THRESHOLD=10  - Annotations needed before consensus calculation (default: 10)
+    CALIBRATION_MIN_SCORED=5  - Scored annotations needed for "calibrated" status (default: 5)
     AGREEMENT_HIGH_THRESHOLD=0.8  - Agreement score to promote to test pool (default: 0.8)
 """
 
@@ -74,6 +75,11 @@ ROLE_ANNOTATOR = "annotator"
 
 # Agreement configuration
 CONSENSUS_THRESHOLD = int(os.environ.get("CONSENSUS_THRESHOLD", "10"))
+# Reliability scoring configuration
+CALIBRATION_MIN_SCORED = int(os.environ.get("CALIBRATION_MIN_SCORED", "5"))  # Min scored annotations to be "calibrated"
+RELIABILITY_COMPLEXITY_WEIGHT = 0.6  # Weight for complexity agreement in reliability score
+RELIABILITY_SPAN_WEIGHT = 0.4  # Weight for span agreement in reliability score
+
 AGREEMENT_HIGH_THRESHOLD = float(os.environ.get("AGREEMENT_HIGH_THRESHOLD", "0.8"))
 
 # ============================================================================
@@ -219,6 +225,10 @@ TAGS_METADATA = [
         "description": "Inter-annotator agreement metrics and question pool management.",
     },
     {
+        "name": "Reliability",
+        "description": "Annotator reliability scoring and leaderboard data.",
+    },
+    {
         "name": "Statistics",
         "description": "View annotation statistics, export data, and manage annotators.",
     },
@@ -231,7 +241,7 @@ TAGS_METADATA = [
 app = FastAPI(
     title="NLI Span Labeler API",
     description=API_DESCRIPTION,
-    version="1.3.0",
+    version="1.4.0",
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_tags=TAGS_METADATA,
@@ -330,6 +340,13 @@ def init_db():
             columns = [row[1] for row in cursor.fetchall()]
             needs_user_migration = 'annotator_id' not in columns
             needs_custom_migration = 'is_custom' not in columns
+
+        # Check if reliability columns exist
+        needs_reliability_migration = False
+        if annotator_agreement_exists:
+            columns = [row[1] for row in conn.execute("PRAGMA table_info(annotator_agreement)").fetchall()]
+            needs_reliability_migration = 'reliability_score' not in columns
+
         
         # Check if role column exists in users
         if users_exist:
@@ -447,13 +464,21 @@ def init_db():
                 agreement_with_consensus REAL,
                 complexity_agreement REAL,
                 span_agreement REAL,
+                reliability_score REAL,
+                calibration_status TEXT DEFAULT 'provisional',
+                scored_annotation_count INTEGER DEFAULT 0,
                 last_calculated TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
 
             CREATE INDEX IF NOT EXISTS idx_example_agreement_score ON example_agreement(agreement_score);
             CREATE INDEX IF NOT EXISTS idx_annotator_agreement_score ON annotator_agreement(agreement_with_consensus);
+            CREATE INDEX IF NOT EXISTS idx_annotator_reliability ON annotator_agreement(reliability_score);
         """)
+
+        # Add reliability columns to existing annotator_agreement table if needed
+        if needs_reliability_migration:
+            migrate_add_reliability_columns(conn)
 
         # Handle migration for existing tables
         if needs_user_migration and labels_exist:
@@ -692,7 +717,39 @@ def migrate_add_pool_status(conn):
     # Add index
     conn.execute("CREATE INDEX IF NOT EXISTS idx_examples_pool ON examples(pool_status)")
     
-    print("Migration complete. Existing annotated examples moved to 'building' pool.")
+    print("Migration complete. Existing annotated examples moved to \'building\' pool.")
+
+def migrate_add_reliability_columns(conn):
+    """Add reliability scoring columns to existing annotator_agreement table."""
+    print("Adding reliability scoring columns to annotator_agreement table...")
+
+    # Add new columns
+    conn.execute("ALTER TABLE annotator_agreement ADD COLUMN reliability_score REAL")
+    conn.execute("ALTER TABLE annotator_agreement ADD COLUMN calibration_status TEXT DEFAULT 'provisional'")
+    conn.execute("ALTER TABLE annotator_agreement ADD COLUMN scored_annotation_count INTEGER DEFAULT 0")
+
+    # Add index for reliability score
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_annotator_reliability ON annotator_agreement(reliability_score)")
+
+    # Initialize scored_annotation_count from existing data
+    conn.execute("""
+        UPDATE annotator_agreement SET scored_annotation_count = total_annotations
+        WHERE total_annotations > 0
+    """)
+
+    # Calculate initial reliability scores for existing annotators
+    # (reliability_score = agreement_with_consensus * 100, since it's already 0-1)
+    conn.execute("""
+        UPDATE annotator_agreement
+        SET reliability_score = agreement_with_consensus * 100,
+            calibration_status = CASE
+                WHEN total_annotations >= ? THEN 'calibrated'
+                ELSE 'provisional'
+            END
+        WHERE agreement_with_consensus IS NOT NULL
+    """, (CALIBRATION_MIN_SCORED,))
+
+    print("Migration complete. Reliability columns added and initialized.")
 
 
 @contextmanager
@@ -1102,22 +1159,37 @@ def calculate_annotator_agreement(conn, user_id: int) -> dict:
 
 
 def update_annotator_agreement(conn, user_id: int):
-    """Recalculate and store agreement metrics for an annotator."""
+    """Recalculate and store agreement metrics and reliability score for an annotator."""
     metrics = calculate_annotator_agreement(conn, user_id)
-    
+
+    # Calculate reliability score (0-100 scale)
+    # Based on agreement_with_consensus which is already 0-1
+    reliability_score = None
+    if metrics['agreement_with_consensus'] is not None:
+        reliability_score = metrics['agreement_with_consensus'] * 100
+
+    # Determine calibration status
+    scored_count = metrics['total_annotations']  # Annotations on examples with consensus
+    calibration_status = 'calibrated' if scored_count >= CALIBRATION_MIN_SCORED else 'provisional'
+
     conn.execute("""
         INSERT INTO annotator_agreement (user_id, total_annotations, agreement_with_consensus,
-                                         complexity_agreement, span_agreement, last_calculated)
-        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                                         complexity_agreement, span_agreement, reliability_score,
+                                         calibration_status, scored_annotation_count, last_calculated)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(user_id) DO UPDATE SET
             total_annotations = excluded.total_annotations,
             agreement_with_consensus = excluded.agreement_with_consensus,
             complexity_agreement = excluded.complexity_agreement,
             span_agreement = excluded.span_agreement,
+            reliability_score = excluded.reliability_score,
+            calibration_status = excluded.calibration_status,
+            scored_annotation_count = excluded.scored_annotation_count,
             last_calculated = CURRENT_TIMESTAMP
     """, (user_id, metrics['total_annotations'], metrics['agreement_with_consensus'],
-          metrics['complexity_agreement'], metrics['span_agreement']))
-    
+          metrics['complexity_agreement'], metrics['span_agreement'],
+          reliability_score, calibration_status, scored_count))
+
     return metrics
 
 
@@ -1458,6 +1530,37 @@ class PoolStatsResponse(BaseModel):
     total: int = Field(..., description="Total examples")
     consensus_threshold: int = Field(..., description="Annotations needed for consensus")
     agreement_threshold: float = Field(..., description="Agreement score for test pool")
+
+
+class ReliabilityScoreResponse(BaseModel):
+    """Response containing reliability score for an annotator."""
+    user_id: int = Field(..., description="User ID")
+    username: str = Field(..., description="Username")
+    display_name: Optional[str] = Field(None, description="Display name")
+    reliability_score: Optional[float] = Field(None, description="Reliability score (0-100)")
+    calibration_status: str = Field(..., description="Calibration status: 'provisional' or 'calibrated'")
+    scored_annotation_count: int = Field(..., description="Number of scored annotations")
+    total_annotations: int = Field(..., description="Total annotations by this user")
+    calibration_threshold: int = Field(..., description="Annotations needed for calibration")
+
+
+class LeaderboardEntry(BaseModel):
+    """A single entry in the leaderboard."""
+    rank: int = Field(..., description="Rank position")
+    user_id: int = Field(..., description="User ID")
+    username: str = Field(..., description="Username")
+    display_name: Optional[str] = Field(None, description="Display name")
+    annotations: int = Field(..., description="Total annotations")
+    reliability_score: Optional[float] = Field(None, description="Reliability score (0-100)")
+    calibration_status: str = Field(..., description="Calibration status")
+    is_current_user: bool = Field(False, description="Whether this is the requesting user")
+
+
+class LeaderboardResponse(BaseModel):
+    """Response containing the full leaderboard."""
+    entries: list[LeaderboardEntry] = Field(..., description="Leaderboard entries")
+    total_annotators: int = Field(..., description="Total number of annotators")
+    calibration_threshold: int = Field(..., description="Annotations needed for calibration")
 
 
 # ============================================================================
@@ -2173,6 +2276,175 @@ async def get_pool_stats(user: dict = Depends(get_current_user)):
             total=total,
             consensus_threshold=CONSENSUS_THRESHOLD,
             agreement_threshold=AGREEMENT_HIGH_THRESHOLD
+        )
+
+
+
+# ============================================================================
+# API Endpoints - Reliability
+# ============================================================================
+
+@app.get(
+    "/api/reliability/me",
+    tags=["Reliability"],
+    summary="Get my reliability score",
+    description="Get the current user's reliability score and calibration status.",
+    response_model=ReliabilityScoreResponse,
+)
+async def get_my_reliability(user: dict = Depends(get_current_user)):
+    """Get the current user's reliability score."""
+    user_id = user["id"]
+
+    with get_db() as conn:
+        # Get total annotations count
+        total_annotations = conn.execute("""
+            SELECT COUNT(*) as count FROM complexity_scores WHERE annotator_id = ?
+        """, (user_id,)).fetchone()["count"]
+
+        # Get reliability data
+        reliability = conn.execute("""
+            SELECT reliability_score, calibration_status, scored_annotation_count
+            FROM annotator_agreement WHERE user_id = ?
+        """, (user_id,)).fetchone()
+
+        if reliability:
+            return ReliabilityScoreResponse(
+                user_id=user_id,
+                username=user["username"],
+                display_name=user.get("display_name"),
+                reliability_score=reliability["reliability_score"],
+                calibration_status=reliability["calibration_status"],
+                scored_annotation_count=reliability["scored_annotation_count"],
+                total_annotations=total_annotations,
+                calibration_threshold=CALIBRATION_MIN_SCORED
+            )
+        else:
+            # No reliability data yet
+            return ReliabilityScoreResponse(
+                user_id=user_id,
+                username=user["username"],
+                display_name=user.get("display_name"),
+                reliability_score=None,
+                calibration_status="provisional",
+                scored_annotation_count=0,
+                total_annotations=total_annotations,
+                calibration_threshold=CALIBRATION_MIN_SCORED
+            )
+
+
+@app.get(
+    "/api/reliability/user/{user_id}",
+    tags=["Reliability"],
+    summary="Get user reliability score",
+    description="Get reliability score and calibration status for a specific user.",
+    response_model=ReliabilityScoreResponse,
+)
+async def get_user_reliability(
+    user_id: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get reliability score for a specific user."""
+    with get_db() as conn:
+        # Get user info
+        user = conn.execute(
+            "SELECT id, username, display_name FROM users WHERE id = ?",
+            (user_id,)
+        ).fetchone()
+
+        if not user:
+            raise HTTPException(404, f"User not found: {user_id}")
+
+        # Get total annotations count
+        total_annotations = conn.execute("""
+            SELECT COUNT(*) as count FROM complexity_scores WHERE annotator_id = ?
+        """, (user_id,)).fetchone()["count"]
+
+        # Get reliability data
+        reliability = conn.execute("""
+            SELECT reliability_score, calibration_status, scored_annotation_count
+            FROM annotator_agreement WHERE user_id = ?
+        """, (user_id,)).fetchone()
+
+        if reliability:
+            return ReliabilityScoreResponse(
+                user_id=user_id,
+                username=user["username"],
+                display_name=user["display_name"],
+                reliability_score=reliability["reliability_score"],
+                calibration_status=reliability["calibration_status"],
+                scored_annotation_count=reliability["scored_annotation_count"],
+                total_annotations=total_annotations,
+                calibration_threshold=CALIBRATION_MIN_SCORED
+            )
+        else:
+            return ReliabilityScoreResponse(
+                user_id=user_id,
+                username=user["username"],
+                display_name=user["display_name"],
+                reliability_score=None,
+                calibration_status="provisional",
+                scored_annotation_count=0,
+                total_annotations=total_annotations,
+                calibration_threshold=CALIBRATION_MIN_SCORED
+            )
+
+
+@app.get(
+    "/api/reliability/leaderboard",
+    tags=["Reliability"],
+    summary="Get leaderboard with reliability scores",
+    description="Get the annotator leaderboard including reliability scores and calibration status.",
+    response_model=LeaderboardResponse,
+)
+async def get_reliability_leaderboard(
+    sort_by: str = Query("annotations", description="Sort by: 'annotations', 'reliability', or 'username'"),
+    current_user: dict = Depends(get_current_user)
+):
+    """Get the leaderboard with reliability scores."""
+    user_id = current_user["id"]
+
+    with get_db() as conn:
+        # Get all annotators with their stats
+        annotators = conn.execute("""
+            SELECT u.id, u.username, u.display_name,
+                   COUNT(DISTINCT c.example_id) as annotations,
+                   aa.reliability_score,
+                   COALESCE(aa.calibration_status, 'provisional') as calibration_status,
+                   COALESCE(aa.scored_annotation_count, 0) as scored_annotation_count
+            FROM users u
+            LEFT JOIN complexity_scores c ON u.id = c.annotator_id
+            LEFT JOIN annotator_agreement aa ON u.id = aa.user_id
+            WHERE u.id > 2  -- Exclude system users (anonymous, legacy)
+            GROUP BY u.id
+            HAVING annotations > 0
+            ORDER BY
+                CASE ?
+                    WHEN 'reliability' THEN -COALESCE(aa.reliability_score, -1)
+                    WHEN 'username' THEN 0
+                    ELSE -annotations
+                END,
+                CASE ? WHEN 'username' THEN u.username ELSE '' END,
+                u.username
+        """, (sort_by, sort_by)).fetchall()
+
+        # Build leaderboard entries
+        entries = []
+        for idx, row in enumerate(annotators, 1):
+            entries.append(LeaderboardEntry(
+                rank=idx,
+                user_id=row["id"],
+                username=row["username"],
+                display_name=row["display_name"],
+                annotations=row["annotations"],
+                reliability_score=row["reliability_score"],
+                calibration_status=row["calibration_status"],
+                is_current_user=(row["id"] == user_id)
+            ))
+
+        return LeaderboardResponse(
+            entries=entries,
+            total_annotators=len(entries),
+            calibration_threshold=CALIBRATION_MIN_SCORED
         )
 
 
