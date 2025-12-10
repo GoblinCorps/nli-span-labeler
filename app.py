@@ -2320,6 +2320,228 @@ async def admin_dashboard(
         }
 
 
+@app.get(
+    "/api/admin/user/{user_id}/annotations",
+    tags=["Admin"],
+    summary="Get user's annotations for review (admin)",
+    description="""Get a user's annotations with consensus comparison for quality review.
+
+Supports filtering by:
+- `dataset`: Filter by specific dataset
+- `disagreements_only`: Only show examples where user disagreed with consensus
+- `limit/offset`: Pagination
+""",
+)
+async def admin_get_user_annotations(
+    user_id: int,
+    dataset: Optional[str] = Query(None, description="Filter by dataset"),
+    disagreements_only: bool = Query(False, description="Only show disagreements"),
+    limit: int = Query(20, ge=1, le=100, description="Max results"),
+    offset: int = Query(0, ge=0, description="Offset for pagination"),
+    admin: dict = Depends(require_admin)
+):
+    """Get user's annotations with consensus comparison."""
+    with get_db() as conn:
+        # Verify user exists
+        user = conn.execute(
+            "SELECT id, username, display_name FROM users WHERE id = ?",
+            (user_id,)
+        ).fetchone()
+
+        if not user:
+            raise HTTPException(404, f"User not found: {user_id}")
+
+        # Build query for user's annotations
+        dataset_filter = "AND e.dataset = ?" if dataset else ""
+        dataset_params = [dataset] if dataset else []
+
+        # Get user's annotations with example data
+        query = f"""
+            SELECT
+                e.id as example_id,
+                e.premise,
+                e.hypothesis,
+                e.dataset,
+                cs.score as user_complexity,
+                GROUP_CONCAT(DISTINCT sl.label) as user_labels,
+                cs.created_at
+            FROM complexity_scores cs
+            JOIN examples e ON cs.example_id = e.id
+            LEFT JOIN span_labels sl ON sl.example_id = e.id AND sl.annotator_id = cs.annotator_id
+            WHERE cs.annotator_id = ?
+            {dataset_filter}
+            GROUP BY e.id, cs.id
+            ORDER BY cs.created_at DESC
+        """
+
+        all_annotations = conn.execute(
+            query, [user_id] + dataset_params
+        ).fetchall()
+
+        # For each annotation, get consensus data
+        results = []
+        for ann in all_annotations:
+            example_id = ann["example_id"]
+
+            # Get consensus labels for this example
+            consensus_labels = conn.execute("""
+                SELECT label, COUNT(*) as count
+                FROM span_labels
+                WHERE example_id = ?
+                GROUP BY label
+                HAVING count >= ?
+            """, (example_id, CONSENSUS_THRESHOLD // 2 + 1)).fetchall()
+
+            consensus_label_set = set(row["label"] for row in consensus_labels) if consensus_labels else set()
+            user_label_set = set(ann["user_labels"].split(",")) if ann["user_labels"] else set()
+
+            # Calculate disagreement
+            missing_labels = consensus_label_set - user_label_set
+            extra_labels = user_label_set - consensus_label_set
+            disagreement_severity = len(missing_labels) + len(extra_labels)
+
+            # Filter if disagreements_only
+            if disagreements_only and disagreement_severity == 0:
+                continue
+
+            # Get consensus complexity
+            consensus_complexity = conn.execute("""
+                SELECT AVG(score) as avg_complexity
+                FROM complexity_scores
+                WHERE example_id = ?
+            """, (example_id,)).fetchone()
+
+            results.append({
+                "example_id": example_id,
+                "premise": ann["premise"],
+                "hypothesis": ann["hypothesis"],
+                "dataset": ann["dataset"],
+                "user_labels": list(user_label_set) if user_label_set else [],
+                "consensus_labels": list(consensus_label_set) if consensus_label_set else [],
+                "user_complexity": ann["user_complexity"],
+                "consensus_complexity": consensus_complexity["avg_complexity"] if consensus_complexity else None,
+                "disagreement_severity": disagreement_severity,
+                "missing_labels": list(missing_labels),
+                "extra_labels": list(extra_labels),
+                "created_at": ann["created_at"]
+            })
+
+        # Apply pagination
+        total = len(results)
+        paginated = results[offset:offset + limit]
+
+        return {
+            "user": {
+                "id": user["id"],
+                "username": user["username"],
+                "display_name": user["display_name"]
+            },
+            "annotations": paginated,
+            "total": total,
+            "limit": limit,
+            "offset": offset
+        }
+
+
+@app.get(
+    "/api/admin/user/{user_id}/disagreements",
+    tags=["Admin"],
+    summary="Get user's disagreements with consensus (admin)",
+    description="Get examples where user's annotation significantly differs from consensus.",
+)
+async def admin_get_user_disagreements(
+    user_id: int,
+    dataset: Optional[str] = Query(None, description="Filter by dataset"),
+    limit: int = Query(20, ge=1, le=100, description="Max results"),
+    admin: dict = Depends(require_admin)
+):
+    """Get examples where user disagreed with consensus."""
+    with get_db() as conn:
+        # Verify user exists
+        user = conn.execute(
+            "SELECT id, username, display_name FROM users WHERE id = ?",
+            (user_id,)
+        ).fetchone()
+
+        if not user:
+            raise HTTPException(404, f"User not found: {user_id}")
+
+        # Build query
+        dataset_filter = "AND e.dataset = ?" if dataset else ""
+        dataset_params = [dataset] if dataset else []
+
+        # Get user's annotations
+        query = f"""
+            SELECT
+                e.id as example_id,
+                e.premise,
+                e.hypothesis,
+                e.dataset,
+                GROUP_CONCAT(DISTINCT sl.label) as user_labels
+            FROM complexity_scores cs
+            JOIN examples e ON cs.example_id = e.id
+            LEFT JOIN span_labels sl ON sl.example_id = e.id AND sl.annotator_id = cs.annotator_id
+            WHERE cs.annotator_id = ?
+            {dataset_filter}
+            GROUP BY e.id
+        """
+
+        annotations = conn.execute(
+            query, [user_id] + dataset_params
+        ).fetchall()
+
+        # Find disagreements
+        results = []
+        for ann in annotations:
+            example_id = ann["example_id"]
+
+            # Get consensus labels
+            consensus_labels = conn.execute("""
+                SELECT label, COUNT(*) as count
+                FROM span_labels
+                WHERE example_id = ?
+                GROUP BY label
+                HAVING count >= ?
+            """, (example_id, CONSENSUS_THRESHOLD // 2 + 1)).fetchall()
+
+            if not consensus_labels:
+                continue  # No consensus yet
+
+            consensus_label_set = set(row["label"] for row in consensus_labels)
+            user_label_set = set(ann["user_labels"].split(",")) if ann["user_labels"] else set()
+
+            # Calculate disagreement
+            missing_labels = consensus_label_set - user_label_set
+            extra_labels = user_label_set - consensus_label_set
+            disagreement_severity = len(missing_labels) + len(extra_labels)
+
+            if disagreement_severity > 0:
+                results.append({
+                    "example_id": example_id,
+                    "premise": ann["premise"][:200] + "..." if len(ann["premise"]) > 200 else ann["premise"],
+                    "hypothesis": ann["hypothesis"][:200] + "..." if len(ann["hypothesis"]) > 200 else ann["hypothesis"],
+                    "dataset": ann["dataset"],
+                    "user_labels": list(user_label_set),
+                    "consensus_labels": list(consensus_label_set),
+                    "missing_labels": list(missing_labels),
+                    "extra_labels": list(extra_labels),
+                    "disagreement_severity": disagreement_severity
+                })
+
+        # Sort by severity
+        results.sort(key=lambda x: x["disagreement_severity"], reverse=True)
+
+        return {
+            "user": {
+                "id": user["id"],
+                "username": user["username"],
+                "display_name": user["display_name"]
+            },
+            "disagreements": results[:limit],
+            "total": len(results)
+        }
+
+
 # ============================================================================
 # API Endpoints - System
 # ============================================================================
