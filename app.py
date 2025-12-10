@@ -16,6 +16,7 @@ Features:
 - Label schema enforcement with custom label tracking
 - Example locking for concurrent multi-user annotation
 - Role-based admin mode with protected endpoints
+- Inter-annotator agreement metrics and question pools
 
 Usage:
     cd nli-span-labeler
@@ -27,6 +28,8 @@ Environment Variables:
     TOKENIZER_MODEL=answerdotai/ModernBERT-base  - HuggingFace model for tokenizer
     LOCK_TIMEOUT_MINUTES=30  - How long example locks last (default: 30)
     ADMIN_USER=username  - Bootstrap admin user (gets admin role on startup)
+    CONSENSUS_THRESHOLD=10  - Annotations needed before consensus calculation (default: 10)
+    AGREEMENT_HIGH_THRESHOLD=0.8  - Agreement score to promote to test pool (default: 0.8)
 """
 
 import json
@@ -38,6 +41,7 @@ from pathlib import Path
 from typing import Optional
 from datetime import datetime, timedelta
 from contextlib import contextmanager
+from collections import defaultdict
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response, Depends, Cookie
 from fastapi.staticfiles import StaticFiles
@@ -67,6 +71,10 @@ ADMIN_USER = os.environ.get("ADMIN_USER", "")  # Username to bootstrap as admin
 # Role constants
 ROLE_ADMIN = "admin"
 ROLE_ANNOTATOR = "annotator"
+
+# Agreement configuration
+CONSENSUS_THRESHOLD = int(os.environ.get("CONSENSUS_THRESHOLD", "10"))
+AGREEMENT_HIGH_THRESHOLD = float(os.environ.get("AGREEMENT_HIGH_THRESHOLD", "0.8"))
 
 # ============================================================================
 # Label Schema Configuration
@@ -141,6 +149,7 @@ A multi-user annotation tool for Natural Language Inference (NLI) examples with 
 - **WordPiece tokenization**: Uses ModernBERT tokenizer for model-aligned annotations
 - **Label schema enforcement**: System labels tracked separately from custom labels
 - **Concurrent annotation**: Example locking prevents duplicate work
+- **Inter-annotator agreement**: Track consensus and annotator reliability
 
 ## Authentication
 
@@ -160,6 +169,13 @@ system-wide operations.
 When you request an example via `/api/next`, it's automatically locked to you for 30 minutes.
 Other users won't receive the same example. Locks are released when you save or skip, or
 you can explicitly release via `/api/lock/release/{example_id}`.
+
+## Question Pools
+
+Examples are categorized into pools:
+- **test**: High-consensus examples used for calibrating new annotators
+- **building**: Being actively annotated, need more responses
+- **zero_entry**: Unannotated examples
 
 ## Label Schema
 
@@ -199,6 +215,10 @@ TAGS_METADATA = [
         "description": "Manage example locks for concurrent annotation.",
     },
     {
+        "name": "Agreement",
+        "description": "Inter-annotator agreement metrics and question pool management.",
+    },
+    {
         "name": "Statistics",
         "description": "View annotation statistics, export data, and manage annotators.",
     },
@@ -211,7 +231,7 @@ TAGS_METADATA = [
 app = FastAPI(
     title="NLI Span Labeler API",
     description=API_DESCRIPTION,
-    version="1.2.0",
+    version="1.3.0",
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_tags=TAGS_METADATA,
@@ -317,6 +337,17 @@ def init_db():
             columns = [row[1] for row in cursor.fetchall()]
             needs_role_migration = 'role' not in columns
 
+        # Check if examples table needs pool_status column
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='examples'"
+        )
+        examples_exist = cursor.fetchone() is not None
+        needs_pool_migration = False
+        if examples_exist:
+            cursor = conn.execute("PRAGMA table_info(examples)")
+            columns = [row[1] for row in cursor.fetchall()]
+            needs_pool_migration = 'pool_status' not in columns
+
         # Create users table first (needed for foreign keys)
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS users (
@@ -371,11 +402,17 @@ def init_db():
                 gold_label INTEGER,
                 gold_label_text TEXT,
                 source_file TEXT,
+                pool_status TEXT DEFAULT 'zero_entry',
                 loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
             CREATE INDEX IF NOT EXISTS idx_examples_dataset ON examples(dataset);
+            CREATE INDEX IF NOT EXISTS idx_examples_pool ON examples(pool_status);
         """)
+
+        # Add pool_status to existing examples table if needed
+        if needs_pool_migration:
+            migrate_add_pool_status(conn)
 
         # Create example_locks table for concurrency handling
         conn.executescript("""
@@ -390,6 +427,32 @@ def init_db():
 
             CREATE INDEX IF NOT EXISTS idx_locks_user ON example_locks(locked_by);
             CREATE INDEX IF NOT EXISTS idx_locks_until ON example_locks(locked_until);
+        """)
+
+        # Create agreement tracking tables
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS example_agreement (
+                example_id TEXT PRIMARY KEY,
+                annotation_count INTEGER DEFAULT 0,
+                agreement_score REAL,
+                complexity_agreement REAL,
+                span_agreement REAL,
+                last_calculated TIMESTAMP,
+                FOREIGN KEY (example_id) REFERENCES examples(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS annotator_agreement (
+                user_id INTEGER PRIMARY KEY,
+                total_annotations INTEGER DEFAULT 0,
+                agreement_with_consensus REAL,
+                complexity_agreement REAL,
+                span_agreement REAL,
+                last_calculated TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_example_agreement_score ON example_agreement(agreement_score);
+            CREATE INDEX IF NOT EXISTS idx_annotator_agreement_score ON annotator_agreement(agreement_with_consensus);
         """)
 
         # Handle migration for existing tables
@@ -612,6 +675,26 @@ def migrate_add_is_custom(conn):
     print(f"Migration complete. Updated {len(all_labels)} labels.")
 
 
+def migrate_add_pool_status(conn):
+    """Add pool_status column to existing examples table."""
+    print("Adding pool_status column to examples table...")
+    
+    # Add column with default value
+    conn.execute("ALTER TABLE examples ADD COLUMN pool_status TEXT DEFAULT 'zero_entry'")
+    
+    # Update existing examples based on annotation count
+    # Examples with annotations go to 'building' pool
+    conn.execute("""
+        UPDATE examples SET pool_status = 'building'
+        WHERE id IN (SELECT DISTINCT example_id FROM complexity_scores)
+    """)
+    
+    # Add index
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_examples_pool ON examples(pool_status)")
+    
+    print("Migration complete. Existing annotated examples moved to 'building' pool.")
+
+
 @contextmanager
 def get_db():
     """Database connection context manager."""
@@ -623,6 +706,419 @@ def get_db():
         conn.commit()
     finally:
         conn.close()
+
+
+# ============================================================================
+# Agreement Calculation Helpers
+# ============================================================================
+
+def calculate_complexity_agreement(scores: list[dict]) -> float:
+    """
+    Calculate agreement for complexity scores across annotators.
+    
+    Uses normalized mean absolute deviation - lower deviation = higher agreement.
+    Returns a score from 0 (no agreement) to 1 (perfect agreement).
+    """
+    if len(scores) < 2:
+        return None
+    
+    dimensions = ['reasoning', 'creativity', 'domain_knowledge', 'contextual', 'constraints', 'ambiguity']
+    total_agreement = 0
+    valid_dimensions = 0
+    
+    for dim in dimensions:
+        values = [s[dim] for s in scores if s.get(dim) is not None]
+        if len(values) < 2:
+            continue
+        
+        # Calculate mean and mean absolute deviation
+        mean_val = sum(values) / len(values)
+        mad = sum(abs(v - mean_val) for v in values) / len(values)
+        
+        # Normalize to 0-1 scale (max deviation is 50 on a 1-100 scale)
+        # Agreement = 1 - (MAD / 50)
+        dimension_agreement = max(0, 1 - (mad / 50))
+        total_agreement += dimension_agreement
+        valid_dimensions += 1
+    
+    if valid_dimensions == 0:
+        return None
+    
+    return total_agreement / valid_dimensions
+
+
+def calculate_span_agreement(annotations: list[dict]) -> float:
+    """
+    Calculate agreement for span selections across annotators.
+    
+    Uses Jaccard similarity - intersection over union of selected spans.
+    Returns a score from 0 (no overlap) to 1 (perfect agreement).
+    """
+    if len(annotations) < 2:
+        return None
+    
+    # Extract span sets per annotator, per label
+    # Format: {annotator_id: {label_name: set((source, word_index), ...)}}
+    annotator_spans = defaultdict(lambda: defaultdict(set))
+    
+    for ann in annotations:
+        annotator_id = ann['annotator_id']
+        for label in ann.get('labels', []):
+            label_name = label['label_name']
+            for span in label.get('spans', []):
+                annotator_spans[annotator_id][label_name].add(
+                    (span['source'], span['word_index'])
+                )
+    
+    if len(annotator_spans) < 2:
+        return None
+    
+    # Calculate pairwise Jaccard similarity for each label
+    annotator_ids = list(annotator_spans.keys())
+    all_labels = set()
+    for spans in annotator_spans.values():
+        all_labels.update(spans.keys())
+    
+    if not all_labels:
+        return 1.0  # No spans = perfect agreement (both empty)
+    
+    total_similarity = 0
+    comparisons = 0
+    
+    for i, aid1 in enumerate(annotator_ids):
+        for aid2 in annotator_ids[i+1:]:
+            label_similarities = []
+            for label in all_labels:
+                set1 = annotator_spans[aid1].get(label, set())
+                set2 = annotator_spans[aid2].get(label, set())
+                
+                if not set1 and not set2:
+                    # Both empty = perfect agreement for this label
+                    label_similarities.append(1.0)
+                elif not set1 or not set2:
+                    # One empty, one not = no agreement
+                    label_similarities.append(0.0)
+                else:
+                    # Jaccard: |intersection| / |union|
+                    intersection = len(set1 & set2)
+                    union = len(set1 | set2)
+                    label_similarities.append(intersection / union)
+            
+            if label_similarities:
+                total_similarity += sum(label_similarities) / len(label_similarities)
+                comparisons += 1
+    
+    if comparisons == 0:
+        return None
+    
+    return total_similarity / comparisons
+
+
+def calculate_example_agreement(conn, example_id: str) -> dict:
+    """
+    Calculate comprehensive agreement metrics for an example.
+    
+    Returns dict with:
+    - annotation_count: number of annotators
+    - agreement_score: combined agreement (0-1)
+    - complexity_agreement: agreement on complexity scores
+    - span_agreement: agreement on span selections
+    """
+    # Get all complexity scores for this example
+    scores = conn.execute("""
+        SELECT annotator_id, reasoning, creativity, domain_knowledge,
+               contextual, constraints, ambiguity
+        FROM complexity_scores
+        WHERE example_id = ?
+    """, (example_id,)).fetchall()
+    
+    scores = [dict(s) for s in scores]
+    annotation_count = len(scores)
+    
+    if annotation_count < 2:
+        return {
+            'annotation_count': annotation_count,
+            'agreement_score': None,
+            'complexity_agreement': None,
+            'span_agreement': None,
+        }
+    
+    # Calculate complexity agreement
+    complexity_agreement = calculate_complexity_agreement(scores)
+    
+    # Get all span annotations for this example
+    annotations = []
+    for score in scores:
+        annotator_id = score['annotator_id']
+        labels = conn.execute("""
+            SELECT l.label_name, l.label_color,
+                   s.source, s.word_index, s.word_text
+            FROM labels l
+            LEFT JOIN span_selections s ON s.label_id = l.id
+            WHERE l.example_id = ? AND l.annotator_id = ?
+        """, (example_id, annotator_id)).fetchall()
+        
+        # Group by label
+        label_dict = defaultdict(lambda: {'label_name': '', 'spans': []})
+        for row in labels:
+            label_name = row['label_name']
+            label_dict[label_name]['label_name'] = label_name
+            if row['source']:  # Has span data
+                label_dict[label_name]['spans'].append({
+                    'source': row['source'],
+                    'word_index': row['word_index'],
+                })
+        
+        annotations.append({
+            'annotator_id': annotator_id,
+            'labels': list(label_dict.values())
+        })
+    
+    # Calculate span agreement
+    span_agreement = calculate_span_agreement(annotations)
+    
+    # Combined agreement: weighted average (complexity more important for NLI)
+    weights = {'complexity': 0.6, 'span': 0.4}
+    
+    combined_parts = []
+    if complexity_agreement is not None:
+        combined_parts.append(('complexity', complexity_agreement))
+    if span_agreement is not None:
+        combined_parts.append(('span', span_agreement))
+    
+    if combined_parts:
+        total_weight = sum(weights[p[0]] for p in combined_parts)
+        agreement_score = sum(weights[p[0]] * p[1] for p in combined_parts) / total_weight
+    else:
+        agreement_score = None
+    
+    return {
+        'annotation_count': annotation_count,
+        'agreement_score': agreement_score,
+        'complexity_agreement': complexity_agreement,
+        'span_agreement': span_agreement,
+    }
+
+
+def update_example_agreement(conn, example_id: str):
+    """
+    Recalculate and store agreement metrics for an example.
+    Also updates pool status based on agreement.
+    """
+    metrics = calculate_example_agreement(conn, example_id)
+    
+    # Store in example_agreement table
+    conn.execute("""
+        INSERT INTO example_agreement (example_id, annotation_count, agreement_score,
+                                       complexity_agreement, span_agreement, last_calculated)
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(example_id) DO UPDATE SET
+            annotation_count = excluded.annotation_count,
+            agreement_score = excluded.agreement_score,
+            complexity_agreement = excluded.complexity_agreement,
+            span_agreement = excluded.span_agreement,
+            last_calculated = CURRENT_TIMESTAMP
+    """, (example_id, metrics['annotation_count'], metrics['agreement_score'],
+          metrics['complexity_agreement'], metrics['span_agreement']))
+    
+    # Update pool status
+    update_example_pool_status(conn, example_id, metrics)
+    
+    return metrics
+
+
+def update_example_pool_status(conn, example_id: str, metrics: dict):
+    """
+    Update pool status based on annotation count and agreement.
+    
+    Pool transitions:
+    - zero_entry -> building: First annotation
+    - building -> test: Reaches threshold AND high agreement
+    - test -> building: If agreement drops (shouldn't happen often)
+    """
+    annotation_count = metrics['annotation_count']
+    agreement_score = metrics['agreement_score']
+    
+    if annotation_count == 0:
+        new_status = 'zero_entry'
+    elif annotation_count < CONSENSUS_THRESHOLD:
+        new_status = 'building'
+    elif agreement_score is not None and agreement_score >= AGREEMENT_HIGH_THRESHOLD:
+        new_status = 'test'
+    else:
+        # Has enough annotations but agreement is low or unknown
+        new_status = 'building'
+    
+    conn.execute("""
+        UPDATE examples SET pool_status = ? WHERE id = ?
+    """, (new_status, example_id))
+
+
+def calculate_annotator_agreement(conn, user_id: int) -> dict:
+    """
+    Calculate agreement metrics for a specific annotator.
+    
+    Measures how often they agree with consensus on examples
+    that have reached the consensus threshold.
+    """
+    # Get all examples this user has annotated that have consensus
+    user_examples = conn.execute("""
+        SELECT c.example_id, ea.agreement_score, ea.annotation_count
+        FROM complexity_scores c
+        JOIN example_agreement ea ON c.example_id = ea.example_id
+        WHERE c.annotator_id = ? AND ea.annotation_count >= ?
+    """, (user_id, CONSENSUS_THRESHOLD)).fetchall()
+    
+    if not user_examples:
+        return {
+            'total_annotations': 0,
+            'agreement_with_consensus': None,
+            'complexity_agreement': None,
+            'span_agreement': None,
+        }
+    
+    total_annotations = len(user_examples)
+    
+    # For each example, compare this user's annotation to the consensus
+    complexity_agreements = []
+    span_agreements = []
+    
+    for row in user_examples:
+        example_id = row['example_id']
+        
+        # Get this user's scores
+        user_scores = conn.execute("""
+            SELECT reasoning, creativity, domain_knowledge,
+                   contextual, constraints, ambiguity
+            FROM complexity_scores
+            WHERE example_id = ? AND annotator_id = ?
+        """, (example_id, user_id)).fetchone()
+        
+        if not user_scores:
+            continue
+        
+        # Get average scores (consensus) from other annotators
+        other_scores = conn.execute("""
+            SELECT AVG(reasoning) as reasoning, AVG(creativity) as creativity,
+                   AVG(domain_knowledge) as domain_knowledge, AVG(contextual) as contextual,
+                   AVG(constraints) as constraints, AVG(ambiguity) as ambiguity
+            FROM complexity_scores
+            WHERE example_id = ? AND annotator_id != ?
+        """, (example_id, user_id)).fetchone()
+        
+        if other_scores and other_scores['reasoning'] is not None:
+            # Calculate agreement with consensus for complexity
+            dimensions = ['reasoning', 'creativity', 'domain_knowledge', 'contextual', 'constraints', 'ambiguity']
+            dim_agreements = []
+            for dim in dimensions:
+                user_val = user_scores[dim]
+                consensus_val = other_scores[dim]
+                if user_val is not None and consensus_val is not None:
+                    # Agreement = 1 - normalized difference
+                    diff = abs(user_val - consensus_val) / 100
+                    dim_agreements.append(1 - diff)
+            
+            if dim_agreements:
+                complexity_agreements.append(sum(dim_agreements) / len(dim_agreements))
+        
+        # Get this user's span selections
+        user_spans = conn.execute("""
+            SELECT l.label_name, s.source, s.word_index
+            FROM labels l
+            LEFT JOIN span_selections s ON s.label_id = l.id
+            WHERE l.example_id = ? AND l.annotator_id = ?
+        """, (example_id, user_id)).fetchall()
+        
+        # Get other annotators' span selections
+        other_spans = conn.execute("""
+            SELECT l.label_name, s.source, s.word_index, l.annotator_id
+            FROM labels l
+            LEFT JOIN span_selections s ON s.label_id = l.id
+            WHERE l.example_id = ? AND l.annotator_id != ?
+        """, (example_id, user_id)).fetchall()
+        
+        if other_spans:
+            # Build user's span set
+            user_span_set = defaultdict(set)
+            for row in user_spans:
+                if row['source']:
+                    user_span_set[row['label_name']].add((row['source'], row['word_index']))
+            
+            # Build consensus span set (majority vote)
+            span_votes = defaultdict(lambda: defaultdict(int))
+            other_annotator_count = len(set(r['annotator_id'] for r in other_spans))
+            
+            for row in other_spans:
+                if row['source']:
+                    span_votes[row['label_name']][(row['source'], row['word_index'])] += 1
+            
+            # Consensus = spans selected by majority
+            consensus_spans = defaultdict(set)
+            majority_threshold = other_annotator_count / 2
+            for label, spans in span_votes.items():
+                for span, count in spans.items():
+                    if count >= majority_threshold:
+                        consensus_spans[label].add(span)
+            
+            # Calculate Jaccard with consensus
+            all_labels = set(user_span_set.keys()) | set(consensus_spans.keys())
+            if all_labels:
+                label_agreements = []
+                for label in all_labels:
+                    user_set = user_span_set.get(label, set())
+                    consensus_set = consensus_spans.get(label, set())
+                    
+                    if not user_set and not consensus_set:
+                        label_agreements.append(1.0)
+                    elif not user_set or not consensus_set:
+                        label_agreements.append(0.0)
+                    else:
+                        intersection = len(user_set & consensus_set)
+                        union = len(user_set | consensus_set)
+                        label_agreements.append(intersection / union)
+                
+                span_agreements.append(sum(label_agreements) / len(label_agreements))
+    
+    # Aggregate results
+    complexity_agreement = sum(complexity_agreements) / len(complexity_agreements) if complexity_agreements else None
+    span_agreement = sum(span_agreements) / len(span_agreements) if span_agreements else None
+    
+    # Combined agreement
+    if complexity_agreement is not None and span_agreement is not None:
+        agreement_with_consensus = 0.6 * complexity_agreement + 0.4 * span_agreement
+    elif complexity_agreement is not None:
+        agreement_with_consensus = complexity_agreement
+    elif span_agreement is not None:
+        agreement_with_consensus = span_agreement
+    else:
+        agreement_with_consensus = None
+    
+    return {
+        'total_annotations': total_annotations,
+        'agreement_with_consensus': agreement_with_consensus,
+        'complexity_agreement': complexity_agreement,
+        'span_agreement': span_agreement,
+    }
+
+
+def update_annotator_agreement(conn, user_id: int):
+    """Recalculate and store agreement metrics for an annotator."""
+    metrics = calculate_annotator_agreement(conn, user_id)
+    
+    conn.execute("""
+        INSERT INTO annotator_agreement (user_id, total_annotations, agreement_with_consensus,
+                                         complexity_agreement, span_agreement, last_calculated)
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(user_id) DO UPDATE SET
+            total_annotations = excluded.total_annotations,
+            agreement_with_consensus = excluded.agreement_with_consensus,
+            complexity_agreement = excluded.complexity_agreement,
+            span_agreement = excluded.span_agreement,
+            last_calculated = CURRENT_TIMESTAMP
+    """, (user_id, metrics['total_annotations'], metrics['agreement_with_consensus'],
+          metrics['complexity_agreement'], metrics['span_agreement']))
+    
+    return metrics
 
 
 # ============================================================================
@@ -882,6 +1378,7 @@ class ExampleResponse(BaseModel):
     existing_labels: list[dict] = Field(..., description="Previously saved labels for this example (by current user)")
     existing_scores: Optional[dict] = Field(None, description="Previously saved complexity scores (by current user)")
     lock_until: Optional[str] = Field(None, description="ISO timestamp when the lock on this example expires")
+    pool_status: Optional[str] = Field(None, description="Question pool status: test, building, or zero_entry")
 
 
 class UserCreate(BaseModel):
@@ -930,6 +1427,39 @@ class LockStatusResponse(BaseModel):
     is_own_lock: bool = Field(False, description="Whether current user owns the lock")
 
 
+class ExampleAgreementResponse(BaseModel):
+    """Response containing agreement metrics for an example."""
+    example_id: str = Field(..., description="Example ID")
+    annotation_count: int = Field(..., description="Number of annotators")
+    agreement_score: Optional[float] = Field(None, description="Combined agreement score (0-1)")
+    complexity_agreement: Optional[float] = Field(None, description="Complexity score agreement (0-1)")
+    span_agreement: Optional[float] = Field(None, description="Span selection agreement (0-1)")
+    pool_status: str = Field(..., description="Current pool status")
+    consensus_threshold: int = Field(..., description="Annotations needed for consensus")
+    needs_more_annotations: bool = Field(..., description="Whether more annotations are needed")
+
+
+class AnnotatorAgreementResponse(BaseModel):
+    """Response containing agreement metrics for an annotator."""
+    user_id: int = Field(..., description="User ID")
+    username: str = Field(..., description="Username")
+    total_annotations: int = Field(..., description="Total annotations by this user")
+    agreement_with_consensus: Optional[float] = Field(None, description="Agreement with consensus (0-1)")
+    complexity_agreement: Optional[float] = Field(None, description="Complexity agreement (0-1)")
+    span_agreement: Optional[float] = Field(None, description="Span agreement (0-1)")
+    last_calculated: Optional[str] = Field(None, description="When metrics were last calculated")
+
+
+class PoolStatsResponse(BaseModel):
+    """Response containing question pool statistics."""
+    test: int = Field(..., description="High-consensus calibration examples")
+    building: int = Field(..., description="Examples being actively annotated")
+    zero_entry: int = Field(..., description="Unannotated examples")
+    total: int = Field(..., description="Total examples")
+    consensus_threshold: int = Field(..., description="Annotations needed for consensus")
+    agreement_threshold: float = Field(..., description="Agreement score for test pool")
+
+
 # ============================================================================
 # Data Loading
 # ============================================================================
@@ -974,8 +1504,8 @@ def ensure_examples_loaded(dataset: str, limit: int = 500):
                 try:
                     conn.execute("""
                         INSERT OR IGNORE INTO examples
-                        (id, dataset, premise, hypothesis, gold_label, gold_label_text, source_file)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        (id, dataset, premise, hypothesis, gold_label, gold_label_text, source_file, pool_status)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'zero_entry')
                     """, (
                         ex.get("id", f"{dataset}_{loaded}"),
                         dataset,
@@ -1224,6 +1754,12 @@ async def admin_get_user(user_id: int, admin: dict = Depends(require_admin)):
             WHERE u.id = ?
         """, (user_id,)).fetchone()
         
+        # Get agreement metrics
+        agreement = conn.execute("""
+            SELECT agreement_with_consensus, complexity_agreement, span_agreement
+            FROM annotator_agreement WHERE user_id = ?
+        """, (user_id,)).fetchone()
+        
         return {
             "id": user["id"],
             "username": user["username"],
@@ -1236,7 +1772,12 @@ async def admin_get_user(user_id: int, admin: dict = Depends(require_admin)):
                 "annotations": stats["annotations"],
                 "skipped": stats["skipped"],
                 "custom_labels": stats["custom_labels"]
-            }
+            },
+            "agreement": {
+                "agreement_with_consensus": agreement["agreement_with_consensus"] if agreement else None,
+                "complexity_agreement": agreement["complexity_agreement"] if agreement else None,
+                "span_agreement": agreement["span_agreement"] if agreement else None,
+            } if agreement else None
         }
 
 
@@ -1458,7 +1999,7 @@ async def list_my_locks(user: dict = Depends(get_current_user)):
             FROM example_locks l
             JOIN examples e ON l.example_id = e.id
             WHERE l.locked_by = ?
-            ORDER BY l.locked_until DESC
+            ORDER BY l.created_at DESC
         """, (user_id,)).fetchall()
         
         return {
@@ -1466,7 +2007,8 @@ async def list_my_locks(user: dict = Depends(get_current_user)):
                 {
                     "example_id": row["example_id"],
                     "dataset": row["dataset"],
-                    "premise": row["premise"][:100] + "..." if len(row["premise"]) > 100 else row["premise"],
+                    "premise": row["premise"][:100],  # Truncate for display
+                    "hypothesis": row["hypothesis"][:100],
                     "locked_until": row["locked_until"],
                     "expires_in_seconds": int((datetime.fromisoformat(row["locked_until"]) - now).total_seconds())
                 }
@@ -1477,171 +2019,234 @@ async def list_my_locks(user: dict = Depends(get_current_user)):
 
 
 # ============================================================================
-# API Endpoints - Examples
+# API Endpoints - Agreement
 # ============================================================================
 
 @app.get(
-    "/api/example/{dataset}/{row_id}",
-    tags=["Examples"],
-    summary="Get specific example",
-    description="Retrieve a specific example by dataset and ID. Returns the tokenized text and any existing annotations by the current user. Does NOT acquire a lock.",
-    response_model=ExampleResponse,
+    "/api/agreement/example/{example_id}",
+    tags=["Agreement"],
+    summary="Get example agreement metrics",
+    description="Get inter-annotator agreement metrics for a specific example.",
+    response_model=ExampleAgreementResponse,
 )
-async def get_example(
-    dataset: str, 
-    row_id: str,
+async def get_example_agreement(
+    example_id: str,
     user: dict = Depends(get_current_user)
 ):
-    """Get a specific example by dataset and row ID."""
-    ensure_examples_loaded(dataset)
-    user_id = user["id"]
-
+    """Get agreement metrics for an example."""
     with get_db() as conn:
-        # Try exact match first
-        row = conn.execute(
-            "SELECT * FROM examples WHERE id = ?",
-            (row_id,)
-        ).fetchone()
-
-        # If not found, try with dataset prefix
-        if not row:
-            row = conn.execute(
-                "SELECT * FROM examples WHERE id = ? OR id = ?",
-                (row_id, f"{dataset}_{row_id}")
-            ).fetchone()
-
-        if not row:
-            raise HTTPException(404, f"Example not found: {dataset}/{row_id}")
-
-        # Get existing labels for this user
-        labels = conn.execute("""
-            SELECT l.id, l.label_name, l.label_color, l.is_custom,
-                   GROUP_CONCAT(s.source || ':' || s.word_index || ':' || s.word_text, '|') as spans
-            FROM labels l
-            LEFT JOIN span_selections s ON s.label_id = l.id
-            WHERE l.example_id = ? AND l.annotator_id = ?
-            GROUP BY l.id
-        """, (row["id"], user_id)).fetchall()
-
-        existing_labels = []
-        for label in labels:
-            spans = []
-            if label["spans"]:
-                for span_str in label["spans"].split("|"):
-                    parts = span_str.split(":")
-                    if len(parts) >= 3:
-                        spans.append({
-                            "source": parts[0],
-                            "word_index": int(parts[1]),
-                            "word_text": parts[2]
-                        })
-            existing_labels.append({
-                "id": label["id"],
-                "label_name": label["label_name"],
-                "label_color": label["label_color"],
-                "is_custom": bool(label["is_custom"]),
-                "spans": spans
-            })
-
-        # Get existing complexity scores for this user
-        scores_row = conn.execute(
-            "SELECT * FROM complexity_scores WHERE example_id = ? AND annotator_id = ?",
-            (row["id"], user_id)
-        ).fetchone()
-
-        existing_scores = None
-        if scores_row:
-            existing_scores = {
-                "reasoning": scores_row["reasoning"],
-                "creativity": scores_row["creativity"],
-                "domain_knowledge": scores_row["domain_knowledge"],
-                "contextual": scores_row["contextual"],
-                "constraints": scores_row["constraints"],
-                "ambiguity": scores_row["ambiguity"],
-            }
-
-        # Check lock status
-        lock_status = get_lock_status(conn, row["id"])
-        lock_until = None
-        if lock_status and lock_status["locked_by"] == user_id:
-            lock_until = lock_status["locked_until"]
-
-        return ExampleResponse(
-            id=row["id"],
-            dataset=row["dataset"],
-            premise=row["premise"],
-            hypothesis=row["hypothesis"],
-            gold_label=row["gold_label"],
-            gold_label_text=row["gold_label_text"],
-            premise_words=tokenize_text(row["premise"]),
-            hypothesis_words=tokenize_text(row["hypothesis"]),
-            existing_labels=existing_labels,
-            existing_scores=existing_scores,
-            lock_until=lock_until
+        # Get or calculate agreement
+        agreement = conn.execute("""
+            SELECT ea.*, e.pool_status
+            FROM example_agreement ea
+            JOIN examples e ON ea.example_id = e.id
+            WHERE ea.example_id = ?
+        """, (example_id,)).fetchone()
+        
+        if not agreement:
+            # Calculate on-demand
+            metrics = calculate_example_agreement(conn, example_id)
+            pool_status = conn.execute(
+                "SELECT pool_status FROM examples WHERE id = ?",
+                (example_id,)
+            ).fetchone()["pool_status"]
+        else:
+            metrics = dict(agreement)
+            pool_status = agreement["pool_status"]
+        
+        return ExampleAgreementResponse(
+            example_id=example_id,
+            annotation_count=metrics['annotation_count'],
+            agreement_score=metrics['agreement_score'],
+            complexity_agreement=metrics['complexity_agreement'],
+            span_agreement=metrics['span_agreement'],
+            pool_status=pool_status,
+            consensus_threshold=CONSENSUS_THRESHOLD,
+            needs_more_annotations=metrics['annotation_count'] < CONSENSUS_THRESHOLD
         )
 
 
 @app.get(
+    "/api/agreement/annotator/{user_id}",
+    tags=["Agreement"],
+    summary="Get annotator agreement metrics",
+    description="Get agreement metrics for a specific annotator.",
+    response_model=AnnotatorAgreementResponse,
+)
+async def get_annotator_agreement(
+    user_id: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get agreement metrics for an annotator."""
+    with get_db() as conn:
+        # Get user info
+        user = conn.execute(
+            "SELECT username FROM users WHERE id = ?",
+            (user_id,)
+        ).fetchone()
+        
+        if not user:
+            raise HTTPException(404, f"User not found: {user_id}")
+        
+        # Get or calculate agreement
+        agreement = conn.execute("""
+            SELECT * FROM annotator_agreement WHERE user_id = ?
+        """, (user_id,)).fetchone()
+        
+        if not agreement:
+            # Calculate on-demand
+            metrics = calculate_annotator_agreement(conn, user_id)
+        else:
+            metrics = dict(agreement)
+        
+        return AnnotatorAgreementResponse(
+            user_id=user_id,
+            username=user["username"],
+            total_annotations=metrics['total_annotations'],
+            agreement_with_consensus=metrics['agreement_with_consensus'],
+            complexity_agreement=metrics['complexity_agreement'],
+            span_agreement=metrics['span_agreement'],
+            last_calculated=agreement["last_calculated"] if agreement else None
+        )
+
+
+@app.post(
+    "/api/agreement/recalculate",
+    tags=["Agreement"],
+    summary="Recalculate all agreement metrics",
+    description="Trigger recalculation of agreement metrics for all examples and annotators. Admin only.",
+)
+async def recalculate_all_agreement(admin: dict = Depends(require_admin)):
+    """Recalculate agreement for all examples and annotators."""
+    with get_db() as conn:
+        # Get all examples with multiple annotations
+        examples = conn.execute("""
+            SELECT example_id, COUNT(*) as count
+            FROM complexity_scores
+            GROUP BY example_id
+            HAVING count >= 2
+        """).fetchall()
+        
+        # Recalculate example agreement
+        for row in examples:
+            update_example_agreement(conn, row["example_id"])
+        
+        # Get all users with annotations
+        users = conn.execute("""
+            SELECT DISTINCT annotator_id FROM complexity_scores
+        """).fetchall()
+        
+        # Recalculate annotator agreement
+        for row in users:
+            update_annotator_agreement(conn, row["annotator_id"])
+        
+        return {
+            "status": "completed",
+            "examples_updated": len(examples),
+            "annotators_updated": len(users)
+        }
+
+
+@app.get(
+    "/api/pools/stats",
+    tags=["Agreement"],
+    summary="Get pool statistics",
+    description="Get statistics about question pools (test, building, zero_entry).",
+    response_model=PoolStatsResponse,
+)
+async def get_pool_stats(user: dict = Depends(get_current_user)):
+    """Get statistics about question pools."""
+    with get_db() as conn:
+        stats = conn.execute("""
+            SELECT pool_status, COUNT(*) as count
+            FROM examples
+            GROUP BY pool_status
+        """).fetchall()
+        
+        pool_counts = {row["pool_status"]: row["count"] for row in stats}
+        total = sum(pool_counts.values())
+        
+        return PoolStatsResponse(
+            test=pool_counts.get('test', 0),
+            building=pool_counts.get('building', 0),
+            zero_entry=pool_counts.get('zero_entry', 0),
+            total=total,
+            consensus_threshold=CONSENSUS_THRESHOLD,
+            agreement_threshold=AGREEMENT_HIGH_THRESHOLD
+        )
+
+
+# ============================================================================
+# API Endpoints - Examples
+# ============================================================================
+
+@app.get(
     "/api/next",
     tags=["Examples"],
-    summary="Get next unlabeled example",
-    description="Get a random unlabeled example for the current user. Optionally filter by dataset. Returns complete=true when all examples have been labeled. Automatically acquires a 30-minute lock on the returned example.",
+    summary="Get next example to annotate",
+    description="Get the next unannotated example for the current user. Automatically locks the example. Prioritizes zero_entry pool, then building pool.",
     response_model=ExampleResponse,
 )
 async def get_next_example(
-    dataset: Optional[str] = Query(None, description="Filter by dataset name"),
+    dataset: str = Query(None, description="Filter by dataset (snli, mnli, anli, etc.)"),
     user: dict = Depends(get_current_user)
 ):
-    """Get the next unlabeled example for the current user."""
+    """Get the next example to annotate."""
     user_id = user["id"]
     
     with get_db() as conn:
-        # Clean up expired locks periodically
+        # Clean up expired locks
         cleanup_expired_locks(conn)
         
-        now = datetime.now().isoformat()
+        # Build query to find unannotated examples
+        # Priority: zero_entry > building
+        # Exclude: already annotated by user, skipped by user, locked by others
+        query = """
+            SELECT e.*, ea.annotation_count,
+                   CASE e.pool_status
+                       WHEN 'zero_entry' THEN 1
+                       WHEN 'building' THEN 2
+                       WHEN 'test' THEN 3
+                       ELSE 4
+                   END as pool_priority
+            FROM examples e
+            LEFT JOIN example_agreement ea ON e.id = ea.example_id
+            WHERE e.id NOT IN (
+                SELECT example_id FROM complexity_scores WHERE annotator_id = ?
+            )
+            AND e.id NOT IN (
+                SELECT example_id FROM skipped WHERE annotator_id = ?
+            )
+            AND e.id NOT IN (
+                SELECT example_id FROM example_locks 
+                WHERE locked_by != ? AND locked_until > datetime('now')
+            )
+        """
         
-        # Build query based on whether dataset is specified
-        # Only show examples this user hasn't labeled or skipped
-        # Also exclude examples locked by OTHER users (but include user's own locks)
+        params = [user_id, user_id, user_id]
+        
         if dataset:
-            ensure_examples_loaded(dataset)
-            row = conn.execute("""
-                SELECT e.* FROM examples e
-                LEFT JOIN complexity_scores c ON e.id = c.example_id AND c.annotator_id = ?
-                LEFT JOIN skipped s ON e.id = s.example_id AND s.annotator_id = ?
-                LEFT JOIN example_locks l ON e.id = l.example_id AND l.locked_until > ? AND l.locked_by != ?
-                WHERE e.dataset = ? 
-                  AND c.example_id IS NULL 
-                  AND s.example_id IS NULL
-                  AND l.example_id IS NULL
-                ORDER BY RANDOM()
-                LIMIT 1
-            """, (user_id, user_id, now, user_id, dataset)).fetchone()
-        else:
-            row = conn.execute("""
-                SELECT e.* FROM examples e
-                LEFT JOIN complexity_scores c ON e.id = c.example_id AND c.annotator_id = ?
-                LEFT JOIN skipped s ON e.id = s.example_id AND s.annotator_id = ?
-                LEFT JOIN example_locks l ON e.id = l.example_id AND l.locked_until > ? AND l.locked_by != ?
-                WHERE c.example_id IS NULL 
-                  AND s.example_id IS NULL
-                  AND l.example_id IS NULL
-                ORDER BY RANDOM()
-                LIMIT 1
-            """, (user_id, user_id, now, user_id)).fetchone()
-
+            query += " AND e.dataset = ?"
+            params.append(dataset)
+        
+        query += " ORDER BY pool_priority, RANDOM() LIMIT 1"
+        
+        row = conn.execute(query, params).fetchone()
+        
         if not row:
-            return {"message": "No more examples to label!", "complete": True}
-
-        # Acquire lock on this example
+            raise HTTPException(404, "No more examples to annotate")
+        
+        # Acquire lock
         lock_until = acquire_lock(conn, row["id"], user_id)
         
-        if not lock_until:
-            # Race condition - someone else got it first, try again
-            # This shouldn't happen often, but handle it gracefully
-            raise HTTPException(409, "Example was locked by another user. Please try again.")
-
+        # Get existing labels (shouldn't exist for next, but check anyway)
+        existing_labels = []
+        existing_scores = None
+        
+        # Tokenize the texts
+        premise_words = tokenize_text(row["premise"])
+        hypothesis_words = tokenize_text(row["hypothesis"])
+        
         return ExampleResponse(
             id=row["id"],
             dataset=row["dataset"],
@@ -1649,11 +2254,98 @@ async def get_next_example(
             hypothesis=row["hypothesis"],
             gold_label=row["gold_label"],
             gold_label_text=row["gold_label_text"],
-            premise_words=tokenize_text(row["premise"]),
-            hypothesis_words=tokenize_text(row["hypothesis"]),
-            existing_labels=[],
-            existing_scores=None,
-            lock_until=lock_until.isoformat()
+            premise_words=premise_words,
+            hypothesis_words=hypothesis_words,
+            existing_labels=existing_labels,
+            existing_scores=existing_scores,
+            lock_until=lock_until.isoformat() if lock_until else None,
+            pool_status=row["pool_status"]
+        )
+
+
+@app.get(
+    "/api/example/{example_id}",
+    tags=["Examples"],
+    summary="Get specific example",
+    description="Get a specific example by ID with tokenized text and existing annotations.",
+    response_model=ExampleResponse,
+)
+async def get_example(
+    example_id: str,
+    user: dict = Depends(get_current_user)
+):
+    """Get a specific example by ID."""
+    user_id = user["id"]
+    
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM examples WHERE id = ?",
+            (example_id,)
+        ).fetchone()
+        
+        if not row:
+            raise HTTPException(404, f"Example not found: {example_id}")
+        
+        # Get existing labels for this user
+        labels = conn.execute("""
+            SELECT l.label_name, l.label_color, l.is_custom,
+                   s.source, s.word_index, s.word_text, s.char_start, s.char_end
+            FROM labels l
+            JOIN span_selections s ON s.label_id = l.id
+            WHERE l.example_id = ? AND l.annotator_id = ?
+        """, (example_id, user_id)).fetchall()
+        
+        # Group spans by label
+        label_dict = {}
+        for label_row in labels:
+            name = label_row["label_name"]
+            if name not in label_dict:
+                label_dict[name] = {
+                    "label_name": name,
+                    "label_color": label_row["label_color"],
+                    "is_custom": bool(label_row["is_custom"]),
+                    "spans": []
+                }
+            label_dict[name]["spans"].append({
+                "source": label_row["source"],
+                "word_index": label_row["word_index"],
+                "word_text": label_row["word_text"],
+                "char_start": label_row["char_start"],
+                "char_end": label_row["char_end"]
+            })
+        
+        existing_labels = list(label_dict.values())
+        
+        # Get existing complexity scores
+        scores = conn.execute("""
+            SELECT reasoning, creativity, domain_knowledge, contextual, constraints, ambiguity
+            FROM complexity_scores
+            WHERE example_id = ? AND annotator_id = ?
+        """, (example_id, user_id)).fetchone()
+        
+        existing_scores = dict(scores) if scores else None
+        
+        # Get lock status
+        lock_status = get_lock_status(conn, example_id)
+        lock_until = lock_status["locked_until"] if lock_status else None
+        
+        # Tokenize the texts
+        premise_words = tokenize_text(row["premise"])
+        hypothesis_words = tokenize_text(row["hypothesis"])
+        
+        return ExampleResponse(
+            id=row["id"],
+            dataset=row["dataset"],
+            premise=row["premise"],
+            hypothesis=row["hypothesis"],
+            gold_label=row["gold_label"],
+            gold_label_text=row["gold_label_text"],
+            premise_words=premise_words,
+            hypothesis_words=hypothesis_words,
+            existing_labels=existing_labels,
+            existing_scores=existing_scores,
+            lock_until=lock_until,
+            pool_status=row["pool_status"]
         )
 
 
@@ -1662,37 +2354,26 @@ async def get_next_example(
 # ============================================================================
 
 @app.post(
-    "/api/annotate",
+    "/api/label",
     tags=["Annotation"],
-    summary="Save annotation",
-    description="Save span labels and complexity scores for an example. Replaces any existing annotation by the current user for this example. Labels are validated against the schema - custom labels are allowed but marked with is_custom=true. Releases any lock on the example.",
+    summary="Submit annotation",
+    description="Submit span labels and complexity scores for an example. Automatically releases any lock. Updates agreement metrics.",
 )
-async def save_annotation(
+async def submit_annotation(
     submission: AnnotationSubmission,
     user: dict = Depends(get_current_user)
 ):
-    """Save span labels and complexity scores for the current user."""
+    """Submit labels and scores for an example."""
     user_id = user["id"]
-    
-    # Track which labels are custom for the response
     custom_labels_used = []
     
     with get_db() as conn:
-        # Verify example exists
-        example = conn.execute(
-            "SELECT id FROM examples WHERE id = ?",
-            (submission.example_id,)
-        ).fetchone()
-
-        if not example:
-            raise HTTPException(404, f"Example not found: {submission.example_id}")
-
-        # Delete existing labels for this example BY THIS USER
+        # Delete existing labels for this user+example
         conn.execute(
             "DELETE FROM labels WHERE example_id = ? AND annotator_id = ?",
             (submission.example_id, user_id)
         )
-
+        
         # Save new labels with is_custom flag
         for label in submission.labels:
             if not label.spans:
@@ -1744,12 +2425,19 @@ async def save_annotation(
 
         # Release the lock (if any)
         release_lock(conn, submission.example_id, user_id)
+        
+        # Update agreement metrics for this example
+        agreement_metrics = update_example_agreement(conn, submission.example_id)
 
         response = {
             "status": "saved", 
             "example_id": submission.example_id, 
             "annotator_id": user_id,
-            "lock_released": True
+            "lock_released": True,
+            "agreement": {
+                "annotation_count": agreement_metrics['annotation_count'],
+                "agreement_score": agreement_metrics['agreement_score'],
+            }
         }
         
         if custom_labels_used:
@@ -1792,7 +2480,7 @@ async def skip_example(
     "/api/stats",
     tags=["Statistics"],
     summary="Get statistics",
-    description="Get annotation statistics including per-dataset counts, label distribution, complexity score averages, per-annotator stats, custom label usage, and active locks.",
+    description="Get annotation statistics including per-dataset counts, label distribution, complexity score averages, per-annotator stats, custom label usage, active locks, and agreement metrics.",
 )
 async def get_stats(user: dict = Depends(get_optional_user)):
     """Get labeling statistics."""
@@ -1882,6 +2570,22 @@ async def get_stats(user: dict = Depends(get_optional_user)):
             FROM example_locks
         """).fetchone()
 
+        # Pool stats
+        pool_stats = conn.execute("""
+            SELECT pool_status, COUNT(*) as count
+            FROM examples
+            GROUP BY pool_status
+        """).fetchall()
+
+        # Agreement stats
+        agreement_stats = conn.execute("""
+            SELECT 
+                AVG(agreement_score) as avg_agreement,
+                COUNT(*) as examples_with_agreement
+            FROM example_agreement
+            WHERE agreement_score IS NOT NULL
+        """).fetchone()
+
         # User-specific stats
         user_stats = None
         if user_id:
@@ -1897,11 +2601,16 @@ async def get_stats(user: dict = Depends(get_optional_user)):
             user_locks = conn.execute("""
                 SELECT COUNT(*) as count FROM example_locks WHERE locked_by = ?
             """, (user_id,)).fetchone()
+            user_agreement = conn.execute("""
+                SELECT agreement_with_consensus FROM annotator_agreement WHERE user_id = ?
+            """, (user_id,)).fetchone()
+            
             user_stats = {
                 "labeled": user_labeled["count"],
                 "skipped": user_skipped["count"],
                 "custom_labels_used": user_custom["count"],
-                "active_locks": user_locks["count"]
+                "active_locks": user_locks["count"],
+                "agreement_with_consensus": user_agreement["agreement_with_consensus"] if user_agreement else None
             }
 
         return {
@@ -1939,6 +2648,15 @@ async def get_stats(user: dict = Depends(get_optional_user)):
                 "users_with_locks": lock_stats["users_with_locks"],
                 "lock_timeout_minutes": LOCK_TIMEOUT_MINUTES,
             },
+            "pool_stats": {
+                row["pool_status"]: row["count"]
+                for row in pool_stats
+            },
+            "agreement_stats": {
+                "average_agreement": agreement_stats["avg_agreement"],
+                "examples_with_agreement": agreement_stats["examples_with_agreement"],
+                "consensus_threshold": CONSENSUS_THRESHOLD,
+            },
             "complexity_averages": {
                 "reasoning": score_avgs["reasoning"],
                 "creativity": score_avgs["creativity"],
@@ -1966,7 +2684,7 @@ async def get_stats(user: dict = Depends(get_optional_user)):
     "/api/export",
     tags=["Statistics"],
     summary="Export annotations",
-    description="Export all annotations as JSONL format. Includes annotator information, complexity scores, span labels with is_custom flag.",
+    description="Export all annotations as JSONL format. Includes annotator information, complexity scores, span labels with is_custom flag, and agreement metrics.",
 )
 async def export_labels():
     """Export all labels as JSONL with annotator information."""
@@ -2010,6 +2728,12 @@ async def export_labels():
                     "char_end": row["char_end"]
                 })
 
+            # Get agreement for this example
+            agreement = conn.execute("""
+                SELECT agreement_score, complexity_agreement, span_agreement
+                FROM example_agreement WHERE example_id = ?
+            """, (ex["id"],)).fetchone()
+
             results.append({
                 "id": ex["id"],
                 "dataset": ex["dataset"],
@@ -2017,6 +2741,7 @@ async def export_labels():
                 "hypothesis": ex["hypothesis"],
                 "gold_label": ex["gold_label"],
                 "gold_label_text": ex["gold_label_text"],
+                "pool_status": ex["pool_status"],
                 "annotator": ex["annotator"],
                 "annotator_name": ex["annotator_name"],
                 "tokenizer": TOKENIZER_MODEL,
@@ -2028,7 +2753,12 @@ async def export_labels():
                     "constraints": ex["constraints"],
                     "ambiguity": ex["ambiguity"],
                 },
-                "span_labels": list(label_spans.values())
+                "span_labels": list(label_spans.values()),
+                "agreement": {
+                    "agreement_score": agreement["agreement_score"] if agreement else None,
+                    "complexity_agreement": agreement["complexity_agreement"] if agreement else None,
+                    "span_agreement": agreement["span_agreement"] if agreement else None,
+                } if agreement else None
             })
 
         return {"count": len(results), "data": results, "tokenizer": TOKENIZER_MODEL}
