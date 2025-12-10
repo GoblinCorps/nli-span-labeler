@@ -954,8 +954,20 @@
             font-style: italic;
         }
 
-        .reliability-cell.has-score {
+        .reliability-cell.reliability-high {
             color: var(--success);
+            font-style: normal;
+            font-weight: 600;
+        }
+
+        .reliability-cell.reliability-medium {
+            color: #f59e0b;
+            font-style: normal;
+            font-weight: 500;
+        }
+
+        .reliability-cell.reliability-low {
+            color: var(--error);
             font-style: normal;
             font-weight: 500;
         }
@@ -2514,24 +2526,83 @@
                     <div class="personal-stat-value">${stats.user_stats.skipped}</div>
                     <div class="personal-stat-label">Skipped</div>
                 </div>
-                <div class="personal-stat-item">
-                    <div class="personal-stat-value" style="color: var(--text-secondary); font-size: 1.2rem;">—</div>
-                    <div class="personal-stat-label">Reliability</div>
-                    <div class="personal-stat-sublabel">coming soon</div>
-                </div>
             `;
+
+            // Fetch reliability score separately
+            try {
+                const reliabilityResp = await fetch('/api/reliability/me');
+                if (reliabilityResp.ok) {
+                    const reliability = await reliabilityResp.json();
+                    const reliabilityDisplay = reliability.calibration_status === 'calibrated' && reliability.reliability_score !== null
+                        ? Math.round(reliability.reliability_score)
+                        : null;
+                    const reliabilitySublabel = reliability.calibration_status === 'provisional'
+                        ? `${reliability.scored_annotation_count}/${reliability.calibration_threshold} calibrating`
+                        : 'calibrated';
+
+                    grid.innerHTML += `
+                        <div class="personal-stat-item">
+                            <div class="personal-stat-value" style="${reliabilityDisplay === null ? 'color: var(--text-secondary); font-size: 1.2rem;' : ''}">${reliabilityDisplay !== null ? reliabilityDisplay : '—'}</div>
+                            <div class="personal-stat-label">Reliability</div>
+                            <div class="personal-stat-sublabel">${reliabilitySublabel}</div>
+                        </div>
+                    `;
+                } else {
+                    grid.innerHTML += `
+                        <div class="personal-stat-item">
+                            <div class="personal-stat-value" style="color: var(--text-secondary); font-size: 1.2rem;">—</div>
+                            <div class="personal-stat-label">Reliability</div>
+                            <div class="personal-stat-sublabel">provisional</div>
+                        </div>
+                    `;
+                }
+            } catch (e) {
+                grid.innerHTML += `
+                    <div class="personal-stat-item">
+                        <div class="personal-stat-value" style="color: var(--text-secondary); font-size: 1.2rem;">—</div>
+                        <div class="personal-stat-label">Reliability</div>
+                        <div class="personal-stat-sublabel">error</div>
+                    </div>
+                `;
+            }
         }
 
-        function renderLeaderboard(annotators) {
+        async function renderLeaderboard(fallbackAnnotators) {
             const content = document.getElementById('leaderboard-content');
 
-            if (!annotators || annotators.length === 0) {
+            // Try to fetch leaderboard with reliability scores
+            let leaderboardEntries = null;
+            let calibrationThreshold = 5;
+
+            try {
+                const resp = await fetch('/api/reliability/leaderboard?sort_by=annotations');
+                if (resp.ok) {
+                    const data = await resp.json();
+                    leaderboardEntries = data.entries;
+                    calibrationThreshold = data.calibration_threshold;
+                }
+            } catch (e) {
+                console.warn('Could not fetch reliability leaderboard, using fallback:', e);
+            }
+
+            // Use fallback if API failed
+            const annotators = leaderboardEntries || fallbackAnnotators || [];
+
+            if (annotators.length === 0) {
                 content.innerHTML = '<p style="color: var(--text-secondary);">No annotators yet.</p>';
                 return;
             }
 
-            // Store data for sorting
-            leaderboardData = annotators;
+            // Store data for sorting (map to consistent format)
+            leaderboardData = annotators.map(a => ({
+                username: a.username,
+                display_name: a.display_name,
+                labeled: a.annotations !== undefined ? a.annotations : a.labeled,
+                reliability_score: a.reliability_score,
+                calibration_status: a.calibration_status || 'provisional',
+                is_current_user: a.is_current_user,
+                role: a.role
+            }));
 
             // Sort data
             const sortedData = sortLeaderboardData();
@@ -2544,7 +2615,7 @@
                             <th onclick="sortLeaderboard('rank')">Rank</th>
                             <th onclick="sortLeaderboard('username')" class="${leaderboardSortColumn === 'username' ? 'sorted-' + leaderboardSortDirection : ''}">User</th>
                             <th onclick="sortLeaderboard('labeled')" class="${leaderboardSortColumn === 'labeled' ? 'sorted-' + leaderboardSortDirection : ''}">Annotations</th>
-                            <th>Reliability</th>
+                            <th onclick="sortLeaderboard('reliability')" class="${leaderboardSortColumn === 'reliability' ? 'sorted-' + leaderboardSortDirection : ''}">Reliability</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -2552,10 +2623,23 @@
 
             sortedData.forEach((annotator, index) => {
                 const rank = index + 1;
-                const isCurrentUser = currentUser && annotator.username === currentUser.username;
+                const isCurrentUser = annotator.is_current_user || (currentUser && annotator.username === currentUser.username);
                 const rankClass = rank <= 3 ? `rank-${rank}` : '';
                 const displayName = annotator.display_name || annotator.username;
                 const roleBadge = annotator.role === 'admin' ? '<span class="role-badge admin">Admin</span>' : '';
+
+                // Format reliability display
+                let reliabilityDisplay = '—';
+                let reliabilityClass = '';
+                if (annotator.calibration_status === 'calibrated' && annotator.reliability_score !== null) {
+                    reliabilityDisplay = Math.round(annotator.reliability_score);
+                    // Color code: green for high, yellow for medium, red for low
+                    if (annotator.reliability_score >= 80) reliabilityClass = 'reliability-high';
+                    else if (annotator.reliability_score >= 60) reliabilityClass = 'reliability-medium';
+                    else reliabilityClass = 'reliability-low';
+                } else if (annotator.calibration_status === 'provisional') {
+                    reliabilityDisplay = '<span style="font-size: 0.8em; opacity: 0.7;">calibrating</span>';
+                }
 
                 html += `
                     <tr class="${isCurrentUser ? 'current-user' : ''}">
@@ -2568,7 +2652,7 @@
                             </div>
                         </td>
                         <td class="score-cell">${annotator.labeled}</td>
-                        <td class="reliability-cell">—</td>
+                        <td class="reliability-cell ${reliabilityClass}">${reliabilityDisplay}</td>
                     </tr>
                 `;
             });
@@ -2576,9 +2660,6 @@
             html += `
                     </tbody>
                 </table>
-                <p style="color: var(--text-secondary); font-size: 0.8rem; margin-top: 15px; text-align: center;">
-                    Reliability scores will be available after <a href="https://github.com/GoblinCorps/nli-span-labeler/issues/23" target="_blank" style="color: var(--accent);">#23</a> is implemented.
-                </p>
             `;
 
             content.innerHTML = html;
@@ -2594,6 +2675,12 @@
                     case 'username':
                         aVal = (a.display_name || a.username).toLowerCase();
                         bVal = (b.display_name || b.username).toLowerCase();
+                        break;
+                    case 'reliability':
+                        // Calibrated with score > provisional > null
+                        // Use -1 for provisional/null so they sort last when descending
+                        aVal = (a.calibration_status === 'calibrated' && a.reliability_score !== null) ? a.reliability_score : -1;
+                        bVal = (b.calibration_status === 'calibrated' && b.reliability_score !== null) ? b.reliability_score : -1;
                         break;
                     case 'labeled':
                     default:
@@ -2620,7 +2707,8 @@
                 leaderboardSortDirection = leaderboardSortDirection === 'asc' ? 'desc' : 'asc';
             } else {
                 leaderboardSortColumn = column;
-                leaderboardSortDirection = column === 'labeled' ? 'desc' : 'asc';
+                // Default to descending for numeric columns, ascending for username
+                leaderboardSortDirection = (column === 'labeled' || column === 'reliability') ? 'desc' : 'asc';
             }
 
             renderLeaderboard(leaderboardData);
