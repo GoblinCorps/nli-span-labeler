@@ -15,6 +15,7 @@ Features:
 - Annotator tracking for all labels and scores
 - Label schema enforcement with custom label tracking
 - Example locking for concurrent multi-user annotation
+- Role-based admin mode with protected endpoints
 - Inter-annotator agreement metrics and question pools
 
 Usage:
@@ -26,6 +27,7 @@ Environment Variables:
     ANONYMOUS_MODE=1  - Disable auth, use anonymous user (for local single-user)
     TOKENIZER_MODEL=answerdotai/ModernBERT-base  - HuggingFace model for tokenizer
     LOCK_TIMEOUT_MINUTES=30  - How long example locks last (default: 30)
+    ADMIN_USER=username  - Bootstrap admin user (gets admin role on startup)
     CONSENSUS_THRESHOLD=10  - Annotations needed before consensus calculation (default: 10)
     AGREEMENT_HIGH_THRESHOLD=0.8  - Agreement score to promote to test pool (default: 0.8)
 """
@@ -64,6 +66,11 @@ ANONYMOUS_USER_ID = 1
 LEGACY_USER_ID = 2
 TOKENIZER_MODEL = os.environ.get("TOKENIZER_MODEL", "answerdotai/ModernBERT-base")
 LOCK_TIMEOUT_MINUTES = int(os.environ.get("LOCK_TIMEOUT_MINUTES", "30"))
+ADMIN_USER = os.environ.get("ADMIN_USER", "")  # Username to bootstrap as admin
+
+# Role constants
+ROLE_ADMIN = "admin"
+ROLE_ANNOTATOR = "annotator"
 
 # Agreement configuration
 CONSENSUS_THRESHOLD = int(os.environ.get("CONSENSUS_THRESHOLD", "10"))
@@ -138,6 +145,7 @@ A multi-user annotation tool for Natural Language Inference (NLI) examples with 
 - **Multiple labels per token**: Annotate tokens with multiple semantic labels
 - **Complexity scoring**: Rate examples on 6 difficulty dimensions (1-100 scale)
 - **Multi-user support**: Session-based authentication with per-user annotation tracking
+- **Role-based access**: Admin and annotator roles with protected endpoints
 - **WordPiece tokenization**: Uses ModernBERT tokenizer for model-aligned annotations
 - **Label schema enforcement**: System labels tracked separately from custom labels
 - **Concurrent annotation**: Example locking prevents duplicate work
@@ -149,6 +157,12 @@ Most endpoints require authentication via session cookie. Use the `/api/auth/log
 `/api/auth/register` endpoints to obtain a session.
 
 Set `ANONYMOUS_MODE=1` environment variable to disable authentication for local single-user usage.
+
+## Admin Mode
+
+Set `ADMIN_USER=username` environment variable to bootstrap a user as admin on startup.
+Admins have access to additional endpoints under `/api/admin/` for user management and
+system-wide operations.
 
 ## Example Locking
 
@@ -185,6 +199,10 @@ TAGS_METADATA = [
         "description": "User registration, login, logout, and session management.",
     },
     {
+        "name": "Admin",
+        "description": "Admin-only endpoints for user management and system configuration. Requires admin role.",
+    },
+    {
         "name": "Examples",
         "description": "Retrieve NLI examples for annotation. Examples are served per-user to avoid duplicate annotations.",
     },
@@ -213,7 +231,7 @@ TAGS_METADATA = [
 app = FastAPI(
     title="NLI Span Labeler API",
     description=API_DESCRIPTION,
-    version="1.2.0",
+    version="1.3.0",
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_tags=TAGS_METADATA,
@@ -306,11 +324,18 @@ def init_db():
         # Check if annotator_id column exists in labels
         needs_user_migration = False
         needs_custom_migration = False
+        needs_role_migration = False
         if labels_exist:
             cursor = conn.execute("PRAGMA table_info(labels)")
             columns = [row[1] for row in cursor.fetchall()]
             needs_user_migration = 'annotator_id' not in columns
             needs_custom_migration = 'is_custom' not in columns
+        
+        # Check if role column exists in users
+        if users_exist:
+            cursor = conn.execute("PRAGMA table_info(users)")
+            columns = [row[1] for row in cursor.fetchall()]
+            needs_role_migration = 'role' not in columns
 
         # Check if examples table needs pool_status column
         cursor = conn.execute(
@@ -330,6 +355,7 @@ def init_db():
                 username TEXT UNIQUE NOT NULL,
                 password_hash TEXT,
                 display_name TEXT,
+                role TEXT NOT NULL DEFAULT 'annotator',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
@@ -347,16 +373,24 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
         """)
 
+        # Handle role migration for existing databases
+        if needs_role_migration:
+            migrate_add_role(conn)
+
         # Create system users if they don't exist
         conn.execute("""
-            INSERT OR IGNORE INTO users (id, username, display_name)
-            VALUES (?, 'anonymous', 'Anonymous User')
+            INSERT OR IGNORE INTO users (id, username, display_name, role)
+            VALUES (?, 'anonymous', 'Anonymous User', 'annotator')
         """, (ANONYMOUS_USER_ID,))
         
         conn.execute("""
-            INSERT OR IGNORE INTO users (id, username, display_name)
-            VALUES (?, 'legacy', 'Legacy Annotations')
+            INSERT OR IGNORE INTO users (id, username, display_name, role)
+            VALUES (?, 'legacy', 'Legacy Annotations', 'annotator')
         """, (LEGACY_USER_ID,))
+
+        # Bootstrap admin user if configured
+        if ADMIN_USER:
+            bootstrap_admin_user(conn)
 
         # Create examples table
         conn.executescript("""
@@ -487,6 +521,42 @@ def init_db():
                 CREATE INDEX IF NOT EXISTS idx_complexity_annotator ON complexity_scores(annotator_id);
                 CREATE INDEX IF NOT EXISTS idx_skipped_annotator ON skipped(annotator_id);
             """)
+
+
+def migrate_add_role(conn):
+    """Add role column to existing users table."""
+    print("Adding role column to users table...")
+    
+    # Add column with default value
+    conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'annotator'")
+    
+    print("Role column added. All existing users set to 'annotator' role.")
+
+
+def bootstrap_admin_user(conn):
+    """Bootstrap the configured admin user."""
+    if not ADMIN_USER:
+        return
+    
+    # Check if user exists
+    row = conn.execute(
+        "SELECT id, role FROM users WHERE username = ?",
+        (ADMIN_USER,)
+    ).fetchone()
+    
+    if row:
+        # User exists - update role to admin if not already
+        if row["role"] != ROLE_ADMIN:
+            conn.execute(
+                "UPDATE users SET role = ? WHERE id = ?",
+                (ROLE_ADMIN, row["id"])
+            )
+            print(f"User '{ADMIN_USER}' promoted to admin role.")
+        else:
+            print(f"User '{ADMIN_USER}' already has admin role.")
+    else:
+        # User doesn't exist yet - they'll get admin role when they register
+        print(f"Admin user '{ADMIN_USER}' not found. Will be granted admin role on registration.")
 
 
 def migrate_existing_data(conn):
@@ -1193,7 +1263,7 @@ def get_user_from_session(token: str) -> Optional[dict]:
         
     with get_db() as conn:
         row = conn.execute("""
-            SELECT u.id, u.username, u.display_name, u.created_at
+            SELECT u.id, u.username, u.display_name, u.role, u.created_at
             FROM sessions s
             JOIN users u ON s.user_id = u.id
             WHERE s.token = ? AND s.expires_at > CURRENT_TIMESTAMP
@@ -1209,6 +1279,7 @@ def get_user_from_session(token: str) -> Optional[dict]:
                 "id": row["id"],
                 "username": row["username"],
                 "display_name": row["display_name"],
+                "role": row["role"],
                 "created_at": row["created_at"]
             }
     
@@ -1228,6 +1299,7 @@ async def get_current_user(request: Request) -> dict:
             "id": ANONYMOUS_USER_ID,
             "username": "anonymous",
             "display_name": "Anonymous User",
+            "role": ROLE_ANNOTATOR,
             "is_anonymous": True
         }
     
@@ -1247,11 +1319,19 @@ async def get_optional_user(request: Request) -> Optional[dict]:
             "id": ANONYMOUS_USER_ID,
             "username": "anonymous",
             "display_name": "Anonymous User",
+            "role": ROLE_ANNOTATOR,
             "is_anonymous": True
         }
     
     token = request.cookies.get("session")
     return get_user_from_session(token)
+
+
+async def require_admin(user: dict = Depends(get_current_user)) -> dict:
+    """Dependency to require admin role."""
+    if user.get("role") != ROLE_ADMIN:
+        raise HTTPException(403, "Admin access required.")
+    return user
 
 
 # ============================================================================
@@ -1319,7 +1399,13 @@ class UserResponse(BaseModel):
     id: int = Field(..., description="User ID")
     username: str = Field(..., description="Username")
     display_name: Optional[str] = Field(None, description="Display name")
+    role: str = Field(ROLE_ANNOTATOR, description="User role (admin or annotator)")
     is_anonymous: bool = Field(False, description="True if running in anonymous mode")
+
+
+class UserRoleUpdate(BaseModel):
+    """Request body for updating a user's role."""
+    role: str = Field(..., description="New role (admin or annotator)", example="admin")
 
 
 class LabelSchemaResponse(BaseModel):
@@ -1465,7 +1551,7 @@ async def root():
     "/api/auth/register",
     tags=["Authentication"],
     summary="Register a new user",
-    description="Create a new user account. Returns a session cookie on success. Disabled when ANONYMOUS_MODE=1.",
+    description="Create a new user account. Returns a session cookie on success. Disabled when ANONYMOUS_MODE=1. If ADMIN_USER env var matches the username, user gets admin role.",
 )
 async def register(user: UserCreate, response: Response):
     """Register a new user."""
@@ -1487,12 +1573,15 @@ async def register(user: UserCreate, response: Response):
         if existing:
             raise HTTPException(400, "Username already taken")
         
+        # Determine role - admin if matches ADMIN_USER env var
+        role = ROLE_ADMIN if user.username == ADMIN_USER else ROLE_ANNOTATOR
+        
         # Create user
         password_hash = hash_password(user.password)
         cursor = conn.execute("""
-            INSERT INTO users (username, password_hash, display_name)
-            VALUES (?, ?, ?)
-        """, (user.username, password_hash, user.display_name or user.username))
+            INSERT INTO users (username, password_hash, display_name, role)
+            VALUES (?, ?, ?, ?)
+        """, (user.username, password_hash, user.display_name or user.username, role))
         
         user_id = cursor.lastrowid
     
@@ -1506,7 +1595,7 @@ async def register(user: UserCreate, response: Response):
         samesite="lax"
     )
     
-    return {"status": "registered", "user_id": user_id, "username": user.username}
+    return {"status": "registered", "user_id": user_id, "username": user.username, "role": role}
 
 
 @app.post(
@@ -1522,7 +1611,7 @@ async def login(user: UserLogin, response: Response):
     
     with get_db() as conn:
         row = conn.execute(
-            "SELECT id, password_hash FROM users WHERE username = ?",
+            "SELECT id, password_hash, role FROM users WHERE username = ?",
             (user.username,)
         ).fetchone()
         
@@ -1530,6 +1619,7 @@ async def login(user: UserLogin, response: Response):
             raise HTTPException(401, "Invalid username or password")
         
         user_id = row["id"]
+        role = row["role"]
     
     # Create session
     token = create_session(user_id)
@@ -1541,7 +1631,7 @@ async def login(user: UserLogin, response: Response):
         samesite="lax"
     )
     
-    return {"status": "logged_in", "user_id": user_id, "username": user.username}
+    return {"status": "logged_in", "user_id": user_id, "username": user.username, "role": role}
 
 
 @app.post(
@@ -1563,7 +1653,7 @@ async def logout(request: Request, response: Response):
     "/api/me",
     tags=["Authentication"],
     summary="Get current user",
-    description="Get information about the currently authenticated user.",
+    description="Get information about the currently authenticated user, including their role.",
     response_model=UserResponse,
 )
 async def get_me(user: dict = Depends(get_optional_user)):
@@ -1573,6 +1663,7 @@ async def get_me(user: dict = Depends(get_optional_user)):
             id=user["id"],
             username=user["username"],
             display_name=user.get("display_name"),
+            role=user.get("role", ROLE_ANNOTATOR),
             is_anonymous=user.get("is_anonymous", False)
         )
     return {"authenticated": False, "anonymous_mode": ANONYMOUS_MODE}
@@ -1588,8 +1679,149 @@ async def auth_status():
     """Get authentication status and mode."""
     return {
         "anonymous_mode": ANONYMOUS_MODE,
-        "registration_enabled": not ANONYMOUS_MODE
+        "registration_enabled": not ANONYMOUS_MODE,
+        "admin_bootstrap_configured": bool(ADMIN_USER)
     }
+
+
+# ============================================================================
+# API Endpoints - Admin
+# ============================================================================
+
+@app.get(
+    "/api/admin/users",
+    tags=["Admin"],
+    summary="List all users (admin)",
+    description="List all users with detailed information including roles. Admin only.",
+)
+async def admin_list_users(admin: dict = Depends(require_admin)):
+    """List all users with admin details."""
+    with get_db() as conn:
+        users = conn.execute("""
+            SELECT u.id, u.username, u.display_name, u.role, u.created_at, u.last_seen,
+                   COUNT(DISTINCT c.example_id) as annotations
+            FROM users u
+            LEFT JOIN complexity_scores c ON u.id = c.annotator_id
+            GROUP BY u.id
+            ORDER BY u.id
+        """).fetchall()
+        
+        return {
+            "users": [
+                {
+                    "id": row["id"],
+                    "username": row["username"],
+                    "display_name": row["display_name"],
+                    "role": row["role"],
+                    "created_at": row["created_at"],
+                    "last_seen": row["last_seen"],
+                    "annotations": row["annotations"],
+                    "is_system_user": row["id"] in (ANONYMOUS_USER_ID, LEGACY_USER_ID)
+                }
+                for row in users
+            ],
+            "total": len(users)
+        }
+
+
+@app.get(
+    "/api/admin/user/{user_id}",
+    tags=["Admin"],
+    summary="Get user details (admin)",
+    description="Get detailed information about a specific user. Admin only.",
+)
+async def admin_get_user(user_id: int, admin: dict = Depends(require_admin)):
+    """Get detailed user information."""
+    with get_db() as conn:
+        user = conn.execute("""
+            SELECT id, username, display_name, role, created_at, last_seen
+            FROM users WHERE id = ?
+        """, (user_id,)).fetchone()
+        
+        if not user:
+            raise HTTPException(404, f"User not found: {user_id}")
+        
+        # Get annotation stats
+        stats = conn.execute("""
+            SELECT 
+                COUNT(DISTINCT c.example_id) as annotations,
+                COUNT(DISTINCT s.example_id) as skipped,
+                COUNT(DISTINCT CASE WHEN l.is_custom = 1 THEN l.id END) as custom_labels
+            FROM users u
+            LEFT JOIN complexity_scores c ON u.id = c.annotator_id
+            LEFT JOIN skipped s ON u.id = s.annotator_id
+            LEFT JOIN labels l ON u.id = l.annotator_id
+            WHERE u.id = ?
+        """, (user_id,)).fetchone()
+        
+        # Get agreement metrics
+        agreement = conn.execute("""
+            SELECT agreement_with_consensus, complexity_agreement, span_agreement
+            FROM annotator_agreement WHERE user_id = ?
+        """, (user_id,)).fetchone()
+        
+        return {
+            "id": user["id"],
+            "username": user["username"],
+            "display_name": user["display_name"],
+            "role": user["role"],
+            "created_at": user["created_at"],
+            "last_seen": user["last_seen"],
+            "is_system_user": user["id"] in (ANONYMOUS_USER_ID, LEGACY_USER_ID),
+            "stats": {
+                "annotations": stats["annotations"],
+                "skipped": stats["skipped"],
+                "custom_labels": stats["custom_labels"]
+            },
+            "agreement": {
+                "agreement_with_consensus": agreement["agreement_with_consensus"] if agreement else None,
+                "complexity_agreement": agreement["complexity_agreement"] if agreement else None,
+                "span_agreement": agreement["span_agreement"] if agreement else None,
+            } if agreement else None
+        }
+
+
+@app.put(
+    "/api/admin/user/{user_id}/role",
+    tags=["Admin"],
+    summary="Update user role (admin)",
+    description="Change a user's role. Cannot modify system users. Admin only.",
+)
+async def admin_update_user_role(
+    user_id: int,
+    role_update: UserRoleUpdate,
+    admin: dict = Depends(require_admin)
+):
+    """Update a user's role."""
+    # Validate role
+    if role_update.role not in (ROLE_ADMIN, ROLE_ANNOTATOR):
+        raise HTTPException(400, f"Invalid role: {role_update.role}. Must be '{ROLE_ADMIN}' or '{ROLE_ANNOTATOR}'.")
+    
+    # Prevent modifying system users
+    if user_id in (ANONYMOUS_USER_ID, LEGACY_USER_ID):
+        raise HTTPException(400, "Cannot modify system user roles.")
+    
+    # Prevent admin from demoting themselves
+    if user_id == admin["id"] and role_update.role != ROLE_ADMIN:
+        raise HTTPException(400, "Cannot demote yourself. Ask another admin.")
+    
+    with get_db() as conn:
+        user = conn.execute("SELECT id, username, role FROM users WHERE id = ?", (user_id,)).fetchone()
+        
+        if not user:
+            raise HTTPException(404, f"User not found: {user_id}")
+        
+        old_role = user["role"]
+        
+        conn.execute("UPDATE users SET role = ? WHERE id = ?", (role_update.role, user_id))
+        
+        return {
+            "status": "updated",
+            "user_id": user_id,
+            "username": user["username"],
+            "old_role": old_role,
+            "new_role": role_update.role
+        }
 
 
 # ============================================================================
@@ -2446,7 +2678,7 @@ async def get_stats(user: dict = Depends(get_optional_user)):
 
         # Annotator stats
         annotator_stats = conn.execute("""
-            SELECT u.username, u.display_name, COUNT(DISTINCT c.example_id) as labeled
+            SELECT u.username, u.display_name, u.role, COUNT(DISTINCT c.example_id) as labeled
             FROM users u
             LEFT JOIN complexity_scores c ON u.id = c.annotator_id
             GROUP BY u.id
@@ -2558,7 +2790,12 @@ async def get_stats(user: dict = Depends(get_optional_user)):
             } if score_avgs["total"] > 0 else None,
             "total_labeled": score_avgs["total"],
             "annotators": [
-                {"username": row["username"], "display_name": row["display_name"], "labeled": row["labeled"]}
+                {
+                    "username": row["username"],
+                    "display_name": row["display_name"],
+                    "role": row["role"],
+                    "labeled": row["labeled"]
+                }
                 for row in annotator_stats
             ],
             "user_stats": user_stats,
@@ -2578,12 +2815,10 @@ async def export_labels():
         examples = conn.execute("""
             SELECT DISTINCT e.*, u.username as annotator, u.display_name as annotator_name,
                    c.reasoning, c.creativity, c.domain_knowledge,
-                   c.contextual, c.constraints, c.ambiguity, c.annotator_id,
-                   ea.agreement_score, ea.annotation_count
+                   c.contextual, c.constraints, c.ambiguity, c.annotator_id
             FROM examples e
             JOIN complexity_scores c ON e.id = c.example_id
             JOIN users u ON c.annotator_id = u.id
-            LEFT JOIN example_agreement ea ON e.id = ea.example_id
         """).fetchall()
 
         results = []
@@ -2616,6 +2851,12 @@ async def export_labels():
                     "char_end": row["char_end"]
                 })
 
+            # Get agreement for this example
+            agreement = conn.execute("""
+                SELECT agreement_score, complexity_agreement, span_agreement
+                FROM example_agreement WHERE example_id = ?
+            """, (ex["id"],)).fetchone()
+
             results.append({
                 "id": ex["id"],
                 "dataset": ex["dataset"],
@@ -2637,9 +2878,10 @@ async def export_labels():
                 },
                 "span_labels": list(label_spans.values()),
                 "agreement": {
-                    "score": ex["agreement_score"],
-                    "annotation_count": ex["annotation_count"],
-                } if ex["agreement_score"] is not None else None
+                    "agreement_score": agreement["agreement_score"] if agreement else None,
+                    "complexity_agreement": agreement["complexity_agreement"] if agreement else None,
+                    "span_agreement": agreement["span_agreement"] if agreement else None,
+                } if agreement else None
             })
 
         return {"count": len(results), "data": results, "tokenizer": TOKENIZER_MODEL}
@@ -2649,18 +2891,16 @@ async def export_labels():
     "/api/users",
     tags=["Statistics"],
     summary="List annotators",
-    description="List all registered annotators with their annotation counts and agreement metrics. Excludes system users (anonymous, legacy).",
+    description="List all registered annotators with their annotation counts. Excludes system users (anonymous, legacy).",
 )
 async def list_users(user: dict = Depends(get_current_user)):
     """List all annotators (for admin purposes)."""
     with get_db() as conn:
         users = conn.execute("""
-            SELECT u.id, u.username, u.display_name, u.created_at, u.last_seen,
-                   COUNT(DISTINCT c.example_id) as annotations,
-                   aa.agreement_with_consensus
+            SELECT u.id, u.username, u.display_name, u.role, u.created_at, u.last_seen,
+                   COUNT(DISTINCT c.example_id) as annotations
             FROM users u
             LEFT JOIN complexity_scores c ON u.id = c.annotator_id
-            LEFT JOIN annotator_agreement aa ON u.id = aa.user_id
             WHERE u.id > 2  -- Exclude system users (anonymous, legacy)
             GROUP BY u.id
             ORDER BY annotations DESC
@@ -2672,10 +2912,10 @@ async def list_users(user: dict = Depends(get_current_user)):
                     "id": row["id"],
                     "username": row["username"],
                     "display_name": row["display_name"],
+                    "role": row["role"],
                     "created_at": row["created_at"],
                     "last_seen": row["last_seen"],
-                    "annotations": row["annotations"],
-                    "agreement_with_consensus": row["agreement_with_consensus"]
+                    "annotations": row["annotations"]
                 }
                 for row in users
             ]
