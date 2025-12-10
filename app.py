@@ -2631,41 +2631,28 @@ async def get_stats(user: dict = Depends(get_optional_user)):
                 "total_spans": span_stats["total_spans"],
                 "examples_with_spans": span_stats["examples_with_spans"]
             },
-            "label_distribution": {
-                row["label_name"]: {
-                    "count": row["count"],
-                    "is_custom": bool(row["is_custom"])
+            "label_distribution": [
+                {
+                    "name": row["label_name"],
+                    "is_custom": bool(row["is_custom"]),
+                    "count": row["count"]
                 }
                 for row in label_dist
-            },
-            "custom_label_stats": {
-                "custom_count": custom_stats["custom_count"] or 0,
-                "system_count": custom_stats["system_count"] or 0,
-                "unique_custom_labels": custom_stats["unique_custom_labels"] or 0,
-            },
-            "lock_stats": {
-                "active_locks": lock_stats["active_locks"],
-                "users_with_locks": lock_stats["users_with_locks"],
-                "lock_timeout_minutes": LOCK_TIMEOUT_MINUTES,
-            },
-            "pool_stats": {
-                row["pool_status"]: row["count"]
-                for row in pool_stats
-            },
-            "agreement_stats": {
-                "average_agreement": agreement_stats["avg_agreement"],
-                "examples_with_agreement": agreement_stats["examples_with_agreement"],
-                "consensus_threshold": CONSENSUS_THRESHOLD,
+            ],
+            "custom_labels": {
+                "total_custom": custom_stats["custom_count"],
+                "total_system": custom_stats["system_count"],
+                "unique_custom": custom_stats["unique_custom_labels"]
             },
             "complexity_averages": {
-                "reasoning": score_avgs["reasoning"],
-                "creativity": score_avgs["creativity"],
-                "domain_knowledge": score_avgs["domain_knowledge"],
-                "contextual": score_avgs["contextual"],
-                "constraints": score_avgs["constraints"],
-                "ambiguity": score_avgs["ambiguity"],
-            } if score_avgs["total"] > 0 else None,
-            "total_labeled": score_avgs["total"],
+                "reasoning": round(score_avgs["reasoning"], 1) if score_avgs["reasoning"] else None,
+                "creativity": round(score_avgs["creativity"], 1) if score_avgs["creativity"] else None,
+                "domain_knowledge": round(score_avgs["domain_knowledge"], 1) if score_avgs["domain_knowledge"] else None,
+                "contextual": round(score_avgs["contextual"], 1) if score_avgs["contextual"] else None,
+                "constraints": round(score_avgs["constraints"], 1) if score_avgs["constraints"] else None,
+                "ambiguity": round(score_avgs["ambiguity"], 1) if score_avgs["ambiguity"] else None,
+                "total": score_avgs["total"]
+            },
             "annotators": [
                 {
                     "username": row["username"],
@@ -2675,130 +2662,448 @@ async def get_stats(user: dict = Depends(get_optional_user)):
                 }
                 for row in annotator_stats
             ],
-            "user_stats": user_stats,
-            "tokenizer": TOKENIZER_MODEL,
+            "locks": {
+                "active": lock_stats["active_locks"],
+                "users_with_locks": lock_stats["users_with_locks"]
+            },
+            "pools": {
+                row["pool_status"]: row["count"]
+                for row in pool_stats
+            },
+            "agreement": {
+                "average_agreement": round(agreement_stats["avg_agreement"], 3) if agreement_stats["avg_agreement"] else None,
+                "examples_with_agreement": agreement_stats["examples_with_agreement"]
+            },
+            "user_stats": user_stats
         }
 
+
+# ============================================================================
+# Export Helper Functions
+# ============================================================================
+
+def get_consensus_labels(conn, example_id: str) -> dict:
+    """
+    Calculate consensus labels from multiple annotators using majority vote.
+    
+    Returns dict with:
+    - labels: list of consensus labels with spans (weighted by annotator reliability)
+    - confidence: confidence score for each label
+    """
+    # Get all annotations for this example
+    annotations = conn.execute("""
+        SELECT l.annotator_id, l.label_name, l.label_color,
+               s.source, s.word_index, s.word_text,
+               aa.agreement_with_consensus as reliability
+        FROM labels l
+        LEFT JOIN span_selections s ON s.label_id = l.id
+        LEFT JOIN annotator_agreement aa ON l.annotator_id = aa.user_id
+        WHERE l.example_id = ?
+    """, (example_id,)).fetchall()
+    
+    if not annotations:
+        return {"labels": [], "confidence": {}}
+    
+    # Group spans by label name
+    label_spans = defaultdict(lambda: defaultdict(list))
+    annotator_count = len(set(row['annotator_id'] for row in annotations))
+    
+    for row in annotations:
+        if row['source']:
+            label_name = row['label_name']
+            span_key = (row['source'], row['word_index'])
+            reliability = row['reliability'] if row['reliability'] is not None else 0.5
+            label_spans[label_name][span_key].append((row['annotator_id'], reliability))
+    
+    consensus_labels = []
+    confidence_scores = {}
+    
+    for label_name, spans in label_spans.items():
+        consensus_spans = []
+        total_confidence = 0
+        
+        for span_key, annotators in spans.items():
+            total_weight = sum(rel for _, rel in annotators)
+            vote_count = len(annotators)
+            threshold = annotator_count * 0.5
+            
+            if total_weight >= threshold:
+                source, word_index = span_key
+                word_text = next(
+                    (row['word_text'] for row in annotations 
+                     if row['source'] == source and row['word_index'] == word_index),
+                    None
+                )
+                
+                consensus_spans.append({
+                    "source": source,
+                    "word_index": word_index,
+                    "word_text": word_text,
+                    "support": vote_count,
+                    "confidence": total_weight / annotator_count
+                })
+                total_confidence += total_weight / annotator_count
+        
+        if consensus_spans:
+            label_color = next(
+                (row['label_color'] for row in annotations if row['label_name'] == label_name),
+                "#808080"
+            )
+            
+            consensus_labels.append({
+                "label_name": label_name,
+                "label_color": label_color,
+                "spans": consensus_spans
+            })
+            confidence_scores[label_name] = total_confidence / len(consensus_spans) if consensus_spans else 0
+    
+    return {"labels": consensus_labels, "confidence": confidence_scores}
+
+
+def get_consensus_complexity(conn, example_id: str) -> dict:
+    """
+    Calculate consensus complexity scores (weighted average by annotator reliability).
+    """
+    scores = conn.execute("""
+        SELECT c.reasoning, c.creativity, c.domain_knowledge, c.contextual, 
+               c.constraints, c.ambiguity, c.annotator_id,
+               aa.agreement_with_consensus as reliability
+        FROM complexity_scores c
+        LEFT JOIN annotator_agreement aa ON c.annotator_id = aa.user_id
+        WHERE c.example_id = ?
+    """, (example_id,)).fetchall()
+    
+    if not scores:
+        return None
+    
+    dimensions = ['reasoning', 'creativity', 'domain_knowledge', 'contextual', 'constraints', 'ambiguity']
+    consensus = {}
+    
+    for dim in dimensions:
+        values = [(row[dim], row['reliability'] if row['reliability'] else 0.5) 
+                  for row in scores if row[dim] is not None]
+        
+        if not values:
+            consensus[dim] = None
+            continue
+        
+        total_weight = sum(rel for _, rel in values)
+        weighted_sum = sum(val * rel for val, rel in values)
+        consensus[dim] = round(weighted_sum / total_weight) if total_weight > 0 else None
+    
+    return consensus
+
+
+def deduplicate_annotations(conn, example_id: str) -> dict:
+    """
+    Pick single best annotation from the highest reliability annotator.
+    """
+    annotators = conn.execute("""
+        SELECT c.annotator_id, aa.agreement_with_consensus as reliability,
+               c.created_at, u.username
+        FROM complexity_scores c
+        LEFT JOIN annotator_agreement aa ON c.annotator_id = aa.user_id
+        LEFT JOIN users u ON c.annotator_id = u.id
+        WHERE c.example_id = ?
+        ORDER BY aa.agreement_with_consensus DESC NULLS LAST, c.created_at DESC
+        LIMIT 1
+    """, (example_id,)).fetchone()
+    
+    if not annotators:
+        return None
+    
+    best_annotator_id = annotators['annotator_id']
+    
+    labels = conn.execute("""
+        SELECT l.label_name, l.label_color, l.is_custom,
+               s.source, s.word_index, s.word_text
+        FROM labels l
+        LEFT JOIN span_selections s ON s.label_id = l.id
+        WHERE l.example_id = ? AND l.annotator_id = ?
+    """, (example_id, best_annotator_id)).fetchall()
+    
+    scores = conn.execute("""
+        SELECT reasoning, creativity, domain_knowledge, contextual, constraints, ambiguity
+        FROM complexity_scores
+        WHERE example_id = ? AND annotator_id = ?
+    """, (example_id, best_annotator_id)).fetchone()
+    
+    label_dict = defaultdict(lambda: {"label_name": "", "label_color": "", "is_custom": False, "spans": []})
+    for row in labels:
+        label_name = row['label_name']
+        label_dict[label_name]['label_name'] = label_name
+        label_dict[label_name]['label_color'] = row['label_color']
+        label_dict[label_name]['is_custom'] = bool(row['is_custom'])
+        if row['source']:
+            label_dict[label_name]['spans'].append({
+                "source": row['source'],
+                "word_index": row['word_index'],
+                "word_text": row['word_text']
+            })
+    
+    return {
+        "annotator_id": best_annotator_id,
+        "annotator_username": annotators['username'],
+        "reliability": annotators['reliability'],
+        "labels": list(label_dict.values()),
+        "complexity_scores": dict(scores) if scores else None
+    }
+
+
+def format_export_record(conn, example_row: dict, mode: str, include_metadata: bool = False) -> dict:
+    """Format a single example record for export based on mode."""
+    example_id = example_row['id']
+    
+    record = {
+        "id": example_id,
+        "dataset": example_row['dataset'],
+        "premise": example_row['premise'],
+        "hypothesis": example_row['hypothesis'],
+        "gold_label": example_row['gold_label'],
+        "gold_label_text": example_row['gold_label_text'],
+    }
+    
+    if mode == "raw":
+        annotations = []
+        annotators = conn.execute("""
+            SELECT DISTINCT annotator_id FROM complexity_scores WHERE example_id = ?
+        """, (example_id,)).fetchall()
+        
+        for annotator_row in annotators:
+            annotator_id = annotator_row['annotator_id']
+            
+            labels = conn.execute("""
+                SELECT l.label_name, l.label_color, l.is_custom,
+                       s.source, s.word_index, s.word_text
+                FROM labels l
+                LEFT JOIN span_selections s ON s.label_id = l.id
+                WHERE l.example_id = ? AND l.annotator_id = ?
+            """, (example_id, annotator_id)).fetchall()
+            
+            scores = conn.execute("""
+                SELECT reasoning, creativity, domain_knowledge, contextual, constraints, ambiguity
+                FROM complexity_scores WHERE example_id = ? AND annotator_id = ?
+            """, (example_id, annotator_id)).fetchone()
+            
+            username = conn.execute("SELECT username FROM users WHERE id = ?", (annotator_id,)).fetchone()
+            
+            label_dict = defaultdict(lambda: {"label_name": "", "label_color": "", "is_custom": False, "spans": []})
+            for row in labels:
+                label_name = row['label_name']
+                label_dict[label_name]['label_name'] = label_name
+                label_dict[label_name]['label_color'] = row['label_color']
+                label_dict[label_name]['is_custom'] = bool(row['is_custom'])
+                if row['source']:
+                    label_dict[label_name]['spans'].append({
+                        "source": row['source'],
+                        "word_index": row['word_index'],
+                        "word_text": row['word_text']
+                    })
+            
+            annotations.append({
+                "annotator_id": annotator_id,
+                "annotator_username": username['username'] if username else None,
+                "labels": list(label_dict.values()),
+                "complexity_scores": dict(scores) if scores else None
+            })
+        
+        record["annotations"] = annotations
+        
+    elif mode == "deduplicated":
+        best = deduplicate_annotations(conn, example_id)
+        if best:
+            record["labels"] = best["labels"]
+            record["complexity_scores"] = best["complexity_scores"]
+            if include_metadata:
+                record["selected_annotator"] = {
+                    "id": best["annotator_id"],
+                    "username": best["annotator_username"],
+                    "reliability": best["reliability"]
+                }
+    
+    elif mode == "consensus":
+        consensus_labels = get_consensus_labels(conn, example_id)
+        consensus_scores = get_consensus_complexity(conn, example_id)
+        record["labels"] = consensus_labels["labels"]
+        record["complexity_scores"] = consensus_scores
+        if include_metadata:
+            record["label_confidence"] = consensus_labels["confidence"]
+    
+    elif mode == "gold":
+        if example_row['gold_label'] is not None:
+            consensus_labels = get_consensus_labels(conn, example_id)
+            consensus_scores = get_consensus_complexity(conn, example_id)
+            record["labels"] = consensus_labels["labels"]
+            record["complexity_scores"] = consensus_scores
+            if include_metadata:
+                record["label_confidence"] = consensus_labels["confidence"]
+        else:
+            return None
+    
+    if include_metadata:
+        agreement = conn.execute("""
+            SELECT annotation_count, agreement_score, complexity_agreement, span_agreement
+            FROM example_agreement WHERE example_id = ?
+        """, (example_id,)).fetchone()
+        
+        if agreement:
+            record["metadata"] = {
+                "annotation_count": agreement['annotation_count'],
+                "agreement_score": agreement['agreement_score'],
+                "complexity_agreement": agreement['complexity_agreement'],
+                "span_agreement": agreement['span_agreement'],
+                "pool_status": example_row.get('pool_status')
+            }
+    
+    return record
+
+
+def export_to_csv(records: list) -> str:
+    """Convert export records to CSV format."""
+    import csv
+    import io
+    
+    if not records:
+        return ""
+    
+    output = io.StringIO()
+    flattened = []
+    
+    for record in records:
+        flat = {
+            "id": record["id"],
+            "dataset": record["dataset"],
+            "premise": record["premise"],
+            "hypothesis": record["hypothesis"],
+            "gold_label": record.get("gold_label"),
+            "gold_label_text": record.get("gold_label_text"),
+        }
+        
+        if "complexity_scores" in record and record["complexity_scores"]:
+            for dim in ['reasoning', 'creativity', 'domain_knowledge', 'contextual', 'constraints', 'ambiguity']:
+                flat[f"complexity_{dim}"] = record["complexity_scores"].get(dim)
+        
+        if "labels" in record:
+            flat["label_names"] = ",".join([l["label_name"] for l in record["labels"]])
+        
+        if "metadata" in record:
+            flat["annotation_count"] = record["metadata"]["annotation_count"]
+            flat["agreement_score"] = record["metadata"].get("agreement_score")
+        
+        flattened.append(flat)
+    
+    if flattened:
+        fieldnames = list(flattened[0].keys())
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(flattened)
+    
+    return output.getvalue()
+
+
+# ============================================================================
+# API Endpoint - Export
+# ============================================================================
 
 @app.get(
     "/api/export",
     tags=["Statistics"],
     summary="Export annotations",
-    description="Export all annotations as JSONL format. Includes annotator information, complexity scores, span labels with is_custom flag, and agreement metrics.",
+    description="""
+Export annotation data with various modes and filters.
+
+**Export Modes:**
+- `raw`: All annotations from all annotators
+- `deduplicated`: One annotation per example (highest reliability annotator)
+- `consensus`: Consensus labels via weighted majority vote
+- `gold`: Only gold-labeled examples with consensus annotations
+
+**Output Formats:**
+- `json`: Structured JSON format (default)
+- `csv`: Flattened CSV format
+
+**Filters:**
+- `dataset`: Filter by specific dataset
+- `min_agreement`: Minimum agreement score (0-1)
+- `min_annotations`: Minimum annotations per example
+- `include_metadata`: Add reliability and agreement metrics
+- `limit`: Cap number of exported examples
+    """,
 )
-async def export_labels():
-    """Export all labels as JSONL with annotator information."""
+async def export_annotations(
+    mode: str = Query("raw", regex="^(raw|deduplicated|consensus|gold)$"),
+    format: str = Query("json", regex="^(json|csv)$"),
+    dataset: Optional[str] = Query(None),
+    min_agreement: Optional[float] = Query(None, ge=0, le=1),
+    min_annotations: Optional[int] = Query(None, ge=1),
+    include_metadata: bool = Query(False),
+    limit: Optional[int] = Query(None, ge=1),
+    user: dict = Depends(get_current_user)
+):
+    """Export annotation data with filtering and formatting options."""
+    
     with get_db() as conn:
-        examples = conn.execute("""
-            SELECT DISTINCT e.*, u.username as annotator, u.display_name as annotator_name,
-                   c.reasoning, c.creativity, c.domain_knowledge,
-                   c.contextual, c.constraints, c.ambiguity, c.annotator_id
+        query = """
+            SELECT DISTINCT e.*, ea.annotation_count, ea.agreement_score
             FROM examples e
-            JOIN complexity_scores c ON e.id = c.example_id
-            JOIN users u ON c.annotator_id = u.id
-        """).fetchall()
-
-        results = []
-        for ex in examples:
-            # Get labels for this example by this annotator
-            labels = conn.execute("""
-                SELECT l.label_name, l.label_color, l.is_custom,
-                       s.source, s.word_index, s.word_text, s.char_start, s.char_end
-                FROM labels l
-                JOIN span_selections s ON s.label_id = l.id
-                WHERE l.example_id = ? AND l.annotator_id = ?
-            """, (ex["id"], ex["annotator_id"])).fetchall()
-
-            # Group spans by label
-            label_spans = {}
-            for row in labels:
-                name = row["label_name"]
-                if name not in label_spans:
-                    label_spans[name] = {
-                        "label_name": name,
-                        "label_color": row["label_color"],
-                        "is_custom": bool(row["is_custom"]),
-                        "spans": []
-                    }
-                label_spans[name]["spans"].append({
-                    "source": row["source"],
-                    "word_index": row["word_index"],
-                    "word_text": row["word_text"],
-                    "char_start": row["char_start"],
-                    "char_end": row["char_end"]
-                })
-
-            # Get agreement for this example
-            agreement = conn.execute("""
-                SELECT agreement_score, complexity_agreement, span_agreement
-                FROM example_agreement WHERE example_id = ?
-            """, (ex["id"],)).fetchone()
-
-            results.append({
-                "id": ex["id"],
-                "dataset": ex["dataset"],
-                "premise": ex["premise"],
-                "hypothesis": ex["hypothesis"],
-                "gold_label": ex["gold_label"],
-                "gold_label_text": ex["gold_label_text"],
-                "pool_status": ex["pool_status"],
-                "annotator": ex["annotator"],
-                "annotator_name": ex["annotator_name"],
-                "tokenizer": TOKENIZER_MODEL,
-                "complexity_scores": {
-                    "reasoning": ex["reasoning"],
-                    "creativity": ex["creativity"],
-                    "domain_knowledge": ex["domain_knowledge"],
-                    "contextual": ex["contextual"],
-                    "constraints": ex["constraints"],
-                    "ambiguity": ex["ambiguity"],
-                },
-                "span_labels": list(label_spans.values()),
-                "agreement": {
-                    "agreement_score": agreement["agreement_score"] if agreement else None,
-                    "complexity_agreement": agreement["complexity_agreement"] if agreement else None,
-                    "span_agreement": agreement["span_agreement"] if agreement else None,
-                } if agreement else None
-            })
-
-        return {"count": len(results), "data": results, "tokenizer": TOKENIZER_MODEL}
-
-
-@app.get(
-    "/api/users",
-    tags=["Statistics"],
-    summary="List annotators",
-    description="List all registered annotators with their annotation counts. Excludes system users (anonymous, legacy).",
-)
-async def list_users(user: dict = Depends(get_current_user)):
-    """List all annotators (for admin purposes)."""
-    with get_db() as conn:
-        users = conn.execute("""
-            SELECT u.id, u.username, u.display_name, u.role, u.created_at, u.last_seen,
-                   COUNT(DISTINCT c.example_id) as annotations
-            FROM users u
-            LEFT JOIN complexity_scores c ON u.id = c.annotator_id
-            WHERE u.id > 2  -- Exclude system users (anonymous, legacy)
-            GROUP BY u.id
-            ORDER BY annotations DESC
-        """).fetchall()
+            LEFT JOIN example_agreement ea ON e.id = ea.example_id
+            WHERE 1=1
+        """
+        params = []
         
-        return {
-            "users": [
-                {
-                    "id": row["id"],
-                    "username": row["username"],
-                    "display_name": row["display_name"],
-                    "role": row["role"],
-                    "created_at": row["created_at"],
-                    "last_seen": row["last_seen"],
-                    "annotations": row["annotations"]
-                }
-                for row in users
-            ]
+        if dataset:
+            query += " AND e.dataset = ?"
+            params.append(dataset)
+        
+        if min_annotations:
+            query += " AND ea.annotation_count >= ?"
+            params.append(min_annotations)
+        
+        if min_agreement:
+            query += " AND ea.agreement_score >= ?"
+            params.append(min_agreement)
+        
+        if mode == "gold":
+            query += " AND e.gold_label IS NOT NULL"
+        
+        if mode != "raw":
+            query += " AND ea.annotation_count > 0"
+        
+        query += " ORDER BY e.id"
+        
+        if limit:
+            query += f" LIMIT {limit}"
+        
+        examples = conn.execute(query, params).fetchall()
+        
+        records = []
+        for example_row in examples:
+            record = format_export_record(conn, dict(example_row), mode, include_metadata)
+            if record:
+                records.append(record)
+        
+        filters_applied = {
+            "dataset": dataset,
+            "min_agreement": min_agreement,
+            "min_annotations": min_annotations,
+            "include_metadata": include_metadata,
+            "limit": limit
         }
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        
+        if format == "csv":
+            csv_content = export_to_csv(records)
+            return Response(
+                content=csv_content,
+                media_type="text/csv",
+                headers={
+                    "Content-Disposition": f"attachment; filename=nli_export_{mode}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                }
+            )
+        else:
+            return {
+                "mode": mode,
+                "format": format,
+                "filters": filters_applied,
+                "count": len(records),
+                "examples": records
+            }
