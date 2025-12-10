@@ -954,8 +954,20 @@
             font-style: italic;
         }
 
-        .reliability-cell.has-score {
+        .reliability-cell.reliability-high {
             color: var(--success);
+            font-style: normal;
+            font-weight: 600;
+        }
+
+        .reliability-cell.reliability-medium {
+            color: #f59e0b;
+            font-style: normal;
+            font-weight: 500;
+        }
+
+        .reliability-cell.reliability-low {
+            color: var(--error);
             font-style: normal;
             font-weight: 500;
         }
@@ -2500,6 +2512,30 @@
             const userRank = sortedAnnotators.findIndex(a => a.username === currentUser.username) + 1;
             const totalAnnotators = sortedAnnotators.length;
 
+            // Get user's reliability score if available
+            const userAnnotator = annotators.find(a => a.username === currentUser.username);
+            const reliabilityScore = userAnnotator?.reliability_score;
+            const isProvisional = userAnnotator?.is_provisional;
+
+            let reliabilityHTML;
+            if (reliabilityScore !== null && reliabilityScore !== undefined) {
+                reliabilityHTML = `
+                    <div class="personal-stat-item">
+                        <div class="personal-stat-value" style="color: var(--success);">${reliabilityScore.toFixed(2)}</div>
+                        <div class="personal-stat-label">Reliability</div>
+                        ${isProvisional ? '<div class="personal-stat-sublabel">calibrating...</div>' : ''}
+                    </div>
+                `;
+            } else {
+                reliabilityHTML = `
+                    <div class="personal-stat-item">
+                        <div class="personal-stat-value" style="color: var(--text-secondary); font-size: 1.2rem;">—</div>
+                        <div class="personal-stat-label">Reliability</div>
+                        <div class="personal-stat-sublabel">coming soon</div>
+                    </div>
+                `;
+            }
+
             grid.innerHTML = `
                 <div class="personal-stat-item">
                     <div class="personal-stat-value rank">#${userRank || '—'}</div>
@@ -2514,11 +2550,7 @@
                     <div class="personal-stat-value">${stats.user_stats.skipped}</div>
                     <div class="personal-stat-label">Skipped</div>
                 </div>
-                <div class="personal-stat-item">
-                    <div class="personal-stat-value" style="color: var(--text-secondary); font-size: 1.2rem;">—</div>
-                    <div class="personal-stat-label">Reliability</div>
-                    <div class="personal-stat-sublabel">coming soon</div>
-                </div>
+                ${reliabilityHTML}
             `;
         }
 
@@ -2544,7 +2576,7 @@
                             <th onclick="sortLeaderboard('rank')">Rank</th>
                             <th onclick="sortLeaderboard('username')" class="${leaderboardSortColumn === 'username' ? 'sorted-' + leaderboardSortDirection : ''}">User</th>
                             <th onclick="sortLeaderboard('labeled')" class="${leaderboardSortColumn === 'labeled' ? 'sorted-' + leaderboardSortDirection : ''}">Annotations</th>
-                            <th>Reliability</th>
+                            <th onclick="sortLeaderboard('reliability')" class="${leaderboardSortColumn === 'reliability' ? 'sorted-' + leaderboardSortDirection : ''}">Reliability</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -2557,6 +2589,26 @@
                 const displayName = annotator.display_name || annotator.username;
                 const roleBadge = annotator.role === 'admin' ? '<span class="role-badge admin">Admin</span>' : '';
 
+                // Reliability score display
+                let reliabilityHTML;
+                if (annotator.reliability_score !== null && annotator.reliability_score !== undefined) {
+                    const score = annotator.reliability_score;
+                    const isProvisional = annotator.is_provisional;
+                    
+                    if (isProvisional) {
+                        reliabilityHTML = `<td class="reliability-cell">calibrating</td>`;
+                    } else {
+                        let reliabilityClass = 'reliability-cell';
+                        if (score >= 0.8) reliabilityClass += ' reliability-high';
+                        else if (score >= 0.6) reliabilityClass += ' reliability-medium';
+                        else reliabilityClass += ' reliability-low';
+                        
+                        reliabilityHTML = `<td class="${reliabilityClass}">${score.toFixed(2)}</td>`;
+                    }
+                } else {
+                    reliabilityHTML = `<td class="reliability-cell">—</td>`;
+                }
+
                 html += `
                     <tr class="${isCurrentUser ? 'current-user' : ''}">
                         <td class="rank-cell ${rankClass}">${rank}</td>
@@ -2568,7 +2620,7 @@
                             </div>
                         </td>
                         <td class="score-cell">${annotator.labeled}</td>
-                        <td class="reliability-cell">—</td>
+                        ${reliabilityHTML}
                     </tr>
                 `;
             });
@@ -2576,9 +2628,6 @@
             html += `
                     </tbody>
                 </table>
-                <p style="color: var(--text-secondary); font-size: 0.8rem; margin-top: 15px; text-align: center;">
-                    Reliability scores will be available after <a href="https://github.com/GoblinCorps/nli-span-labeler/issues/23" target="_blank" style="color: var(--accent);">#23</a> is implemented.
-                </p>
             `;
 
             content.innerHTML = html;
@@ -2594,6 +2643,10 @@
                     case 'username':
                         aVal = (a.display_name || a.username).toLowerCase();
                         bVal = (b.display_name || b.username).toLowerCase();
+                        break;
+                    case 'reliability':
+                        aVal = a.reliability_score ?? -1;  // Null/undefined scores sort last
+                        bVal = b.reliability_score ?? -1;
                         break;
                     case 'labeled':
                     default:
@@ -2620,10 +2673,29 @@
                 leaderboardSortDirection = leaderboardSortDirection === 'asc' ? 'desc' : 'asc';
             } else {
                 leaderboardSortColumn = column;
-                leaderboardSortDirection = column === 'labeled' ? 'desc' : 'asc';
+                leaderboardSortDirection = column === 'labeled' || column === 'reliability' ? 'desc' : 'asc';
             }
 
             renderLeaderboard(leaderboardData);
+        }
+
+        async function showStats() {
+            switchTab('stats');
+        }
+
+        async function exportLabels() {
+            try {
+                const resp = await authenticatedFetch('/api/export');
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'annotations.jsonl';
+                a.click();
+                URL.revokeObjectURL(url);
+            } catch (e) {
+                showMessage(`Error: ${e.message}`, 'error');
+            }
         }
 
         async function lookupExample() {
@@ -2652,38 +2724,11 @@
                 resetLabelsForNewExample();
                 renderExample();
                 resetFocus();
-
-                if (data.existing_labels && data.existing_labels.length > 0) {
-                    loadExistingLabels(data.existing_labels);
-                }
+                showMessage(`Loaded example ${id}`, 'success');
             } catch (e) {
                 resultArea.innerHTML = `<div class="message error">Error: ${e.message}</div>`;
             }
         }
-
-        async function exportLabels() {
-            try {
-                const resp = await authenticatedFetch('/api/export');
-                const data = await resp.json();
-
-                const blob = new Blob(
-                    [data.data.map(d => JSON.stringify(d)).join('\n')],
-                    { type: 'application/jsonl' }
-                );
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = `nli_span_labels_${new Date().toISOString().split('T')[0]}.jsonl`;
-                a.click();
-                URL.revokeObjectURL(url);
-
-                showMessage(`Exported ${data.count} labeled examples`, 'success');
-            } catch (e) {
-                showMessage(`Export error: ${e.message}`, 'error');
-            }
-        }
-
-        function showStats() { switchTab('stats'); }
     </script>
 </body>
 </html>
