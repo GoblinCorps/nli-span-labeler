@@ -2589,43 +2589,42 @@ async def get_example(
         # Get existing labels for this user
         labels = conn.execute("""
             SELECT l.label_name, l.label_color, l.is_custom,
-                   s.source, s.word_index, s.word_text, s.char_start, s.char_end
+                   s.source, s.word_index, s.word_text
             FROM labels l
-            JOIN span_selections s ON s.label_id = l.id
+            LEFT JOIN span_selections s ON s.label_id = l.id
             WHERE l.example_id = ? AND l.annotator_id = ?
         """, (example_id, user_id)).fetchall()
         
-        # Group spans by label
+        # Group by label
         label_dict = {}
         for label_row in labels:
-            name = label_row["label_name"]
-            if name not in label_dict:
-                label_dict[name] = {
-                    "label_name": name,
+            label_name = label_row["label_name"]
+            if label_name not in label_dict:
+                label_dict[label_name] = {
+                    "label_name": label_name,
                     "label_color": label_row["label_color"],
                     "is_custom": bool(label_row["is_custom"]),
                     "spans": []
                 }
-            label_dict[name]["spans"].append({
-                "source": label_row["source"],
-                "word_index": label_row["word_index"],
-                "word_text": label_row["word_text"],
-                "char_start": label_row["char_start"],
-                "char_end": label_row["char_end"]
-            })
+            if label_row["source"]:  # Has span data
+                label_dict[label_name]["spans"].append({
+                    "source": label_row["source"],
+                    "word_index": label_row["word_index"],
+                    "word_text": label_row["word_text"]
+                })
         
         existing_labels = list(label_dict.values())
         
         # Get existing complexity scores
-        scores = conn.execute("""
+        scores_row = conn.execute("""
             SELECT reasoning, creativity, domain_knowledge, contextual, constraints, ambiguity
             FROM complexity_scores
             WHERE example_id = ? AND annotator_id = ?
         """, (example_id, user_id)).fetchone()
         
-        existing_scores = dict(scores) if scores else None
+        existing_scores = dict(scores_row) if scores_row else None
         
-        # Get lock status
+        # Check lock status
         lock_status = get_lock_status(conn, example_id)
         lock_until = lock_status["locked_until"] if lock_status else None
         
@@ -2654,125 +2653,123 @@ async def get_example(
 # ============================================================================
 
 @app.post(
-    "/api/label",
+    "/api/save",
     tags=["Annotation"],
-    summary="Submit annotation",
-    description="Submit span labels and complexity scores for an example. Automatically releases any lock. Updates agreement and reliability metrics.",
+    summary="Save annotation",
+    description="Save span labels and complexity scores for an example. Replaces any existing annotations for this example by the current user. Automatically releases the lock.",
 )
-async def submit_annotation(
-    submission: AnnotationSubmission,
+async def save_annotation(
+    annotation: AnnotationSubmission,
     user: dict = Depends(get_current_user)
 ):
-    """Submit labels and scores for an example."""
+    """Save an annotation for an example."""
     user_id = user["id"]
-    custom_labels_used = []
+    example_id = annotation.example_id
     
     with get_db() as conn:
-        # Delete existing labels for this user+example
+        # Check if example exists
+        example = conn.execute(
+            "SELECT id FROM examples WHERE id = ?",
+            (example_id,)
+        ).fetchone()
+        
+        if not example:
+            raise HTTPException(404, f"Example not found: {example_id}")
+        
+        # Delete existing annotations for this user/example
         conn.execute(
             "DELETE FROM labels WHERE example_id = ? AND annotator_id = ?",
-            (submission.example_id, user_id)
+            (example_id, user_id)
+        )
+        conn.execute(
+            "DELETE FROM complexity_scores WHERE example_id = ? AND annotator_id = ?",
+            (example_id, user_id)
         )
         
-        # Save new labels with is_custom flag
-        for label in submission.labels:
-            if not label.spans:
-                continue  # Skip labels with no spans
-
-            # Check if this is a custom label
-            is_custom = not is_system_label(label.label_name)
-            if is_custom:
-                custom_labels_used.append(label.label_name)
-
+        # Insert new labels and spans
+        for label_submission in annotation.labels:
+            # Determine if custom
+            is_custom = 0 if is_system_label(label_submission.label_name) else 1
+            
             cursor = conn.execute("""
                 INSERT INTO labels (example_id, annotator_id, label_name, label_color, is_custom)
                 VALUES (?, ?, ?, ?, ?)
-            """, (submission.example_id, user_id, label.label_name, label.label_color, is_custom))
+            """, (example_id, user_id, label_submission.label_name, 
+                  label_submission.label_color, is_custom))
+            
             label_id = cursor.lastrowid
-
-            # Save span selections
-            for span in label.spans:
+            
+            # Insert span selections
+            for span in label_submission.spans:
                 conn.execute("""
-                    INSERT INTO span_selections
-                    (label_id, source, word_index, word_text, char_start, char_end)
+                    INSERT INTO span_selections (label_id, source, word_index, word_text, char_start, char_end)
                     VALUES (?, ?, ?, ?, ?, ?)
-                """, (
-                    label_id,
-                    span.source,
-                    span.word_index,
-                    span.word_text,
-                    span.char_start,
-                    span.char_end
-                ))
-
-        # Save complexity scores if provided
-        if submission.complexity_scores:
+                """, (label_id, span.source, span.word_index, span.word_text, 
+                      span.char_start, span.char_end))
+        
+        # Insert complexity scores if provided
+        if annotation.complexity_scores:
+            scores = annotation.complexity_scores
             conn.execute("""
-                INSERT OR REPLACE INTO complexity_scores
+                INSERT INTO complexity_scores 
                 (example_id, annotator_id, reasoning, creativity, domain_knowledge, 
                  contextual, constraints, ambiguity)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                submission.example_id,
-                user_id,
-                submission.complexity_scores.get("reasoning"),
-                submission.complexity_scores.get("creativity"),
-                submission.complexity_scores.get("domain_knowledge"),
-                submission.complexity_scores.get("contextual"),
-                submission.complexity_scores.get("constraints"),
-                submission.complexity_scores.get("ambiguity"),
-            ))
-
-        # Release the lock (if any)
-        release_lock(conn, submission.example_id, user_id)
+            """, (example_id, user_id, 
+                  scores.get("reasoning"), scores.get("creativity"), 
+                  scores.get("domain_knowledge"), scores.get("contextual"),
+                  scores.get("constraints"), scores.get("ambiguity")))
         
-        # Update agreement metrics for this example
-        agreement_metrics = update_example_agreement(conn, submission.example_id)
+        # Release lock
+        release_lock(conn, example_id, user_id)
         
-        # Update reliability metrics for this user
+        # Update example agreement and pool status
+        update_example_agreement(conn, example_id)
+        
+        # Update annotator agreement and reliability
         update_reliability_after_annotation(conn, user_id)
-
-        response = {
-            "status": "saved", 
-            "example_id": submission.example_id, 
-            "annotator_id": user_id,
-            "lock_released": True,
-            "agreement": {
-                "annotation_count": agreement_metrics['annotation_count'],
-                "agreement_score": agreement_metrics['agreement_score'],
-            }
+        
+        return {
+            "status": "saved",
+            "example_id": example_id,
+            "labels_count": len(annotation.labels),
+            "has_complexity_scores": annotation.complexity_scores is not None
         }
-        
-        if custom_labels_used:
-            response["custom_labels"] = custom_labels_used
-            response["note"] = f"Custom labels used: {', '.join(custom_labels_used)}. These are tracked separately from system labels."
-        
-        return response
 
 
 @app.post(
     "/api/skip/{example_id}",
     tags=["Annotation"],
     summary="Skip example",
-    description="Mark an example as skipped. Skipped examples won't appear in /api/next for the current user. Releases any lock on the example.",
+    description="Mark an example as skipped by the current user. The example won't be served again to this user. Automatically releases the lock.",
 )
 async def skip_example(
     example_id: str,
     user: dict = Depends(get_current_user)
 ):
-    """Mark an example as skipped by the current user."""
+    """Mark an example as skipped."""
     user_id = user["id"]
     
     with get_db() as conn:
+        # Check if example exists
+        example = conn.execute(
+            "SELECT id FROM examples WHERE id = ?",
+            (example_id,)
+        ).fetchone()
+        
+        if not example:
+            raise HTTPException(404, f"Example not found: {example_id}")
+        
+        # Insert skip record (ignore if already skipped)
         conn.execute("""
-            INSERT OR REPLACE INTO skipped (example_id, annotator_id)
+            INSERT OR IGNORE INTO skipped (example_id, annotator_id)
             VALUES (?, ?)
         """, (example_id, user_id))
         
-        # Release the lock (if any)
+        # Release lock
         release_lock(conn, example_id, user_id)
         
-        return {"status": "skipped", "example_id": example_id, "annotator_id": user_id, "lock_released": True}
+        return {"status": "skipped", "example_id": example_id}
 
 
 # ============================================================================
@@ -2782,254 +2779,288 @@ async def skip_example(
 @app.get(
     "/api/stats",
     tags=["Statistics"],
-    summary="Get statistics",
-    description="Get annotation statistics including per-dataset counts, label distribution, complexity score averages, per-annotator stats, custom label usage, active locks, agreement metrics, and reliability scores.",
+    summary="Get annotation statistics",
+    description="Get overall annotation statistics including counts by user, dataset, and label usage.",
 )
 async def get_stats(user: dict = Depends(get_optional_user)):
-    """Get labeling statistics."""
-    user_id = user["id"] if user else None
-    
+    """Get annotation statistics."""
     with get_db() as conn:
-        # Clean up expired locks
-        cleanup_expired_locks(conn)
+        # Total counts
+        total_examples = conn.execute("SELECT COUNT(*) FROM examples").fetchone()[0]
+        total_annotated = conn.execute("SELECT COUNT(DISTINCT example_id) FROM complexity_scores").fetchone()[0]
+        total_skipped = conn.execute("SELECT COUNT(DISTINCT example_id) FROM skipped").fetchone()[0]
         
-        # Total examples per dataset
-        dataset_counts = conn.execute("""
-            SELECT dataset, COUNT(*) as total FROM examples GROUP BY dataset
-        """).fetchall()
-
-        # Labeled examples per dataset (all users)
-        labeled_counts = conn.execute("""
-            SELECT e.dataset, COUNT(DISTINCT c.example_id) as labeled
-            FROM examples e
-            LEFT JOIN complexity_scores c ON e.id = c.example_id
-            WHERE c.example_id IS NOT NULL
-            GROUP BY e.dataset
-        """).fetchall()
-
-        # Skipped examples per dataset (all users)
-        skipped_counts = conn.execute("""
-            SELECT e.dataset, COUNT(DISTINCT s.example_id) as skipped
-            FROM examples e
-            LEFT JOIN skipped s ON e.id = s.example_id
-            WHERE s.example_id IS NOT NULL
-            GROUP BY e.dataset
-        """).fetchall()
-
-        # Total span labels
-        span_stats = conn.execute("""
-            SELECT
-                COUNT(DISTINCT l.id) as total_labels,
-                COUNT(s.id) as total_spans,
-                COUNT(DISTINCT l.example_id) as examples_with_spans
-            FROM labels l
-            LEFT JOIN span_selections s ON s.label_id = l.id
-        """).fetchone()
-
-        # Label distribution (with custom flag)
-        label_dist = conn.execute("""
-            SELECT label_name, is_custom, COUNT(*) as count
+        # Labels by frequency
+        label_counts = conn.execute("""
+            SELECT label_name, COUNT(*) as count, is_custom
             FROM labels
-            GROUP BY label_name, is_custom
+            GROUP BY label_name
             ORDER BY count DESC
         """).fetchall()
-
-        # Custom label stats
-        custom_stats = conn.execute("""
-            SELECT 
-                SUM(CASE WHEN is_custom = 1 THEN 1 ELSE 0 END) as custom_count,
-                SUM(CASE WHEN is_custom = 0 THEN 1 ELSE 0 END) as system_count,
-                COUNT(DISTINCT CASE WHEN is_custom = 1 THEN label_name END) as unique_custom_labels
-            FROM labels
-        """).fetchone()
-
-        # Complexity score averages
-        score_avgs = conn.execute("""
-            SELECT
-                AVG(reasoning) as reasoning,
-                AVG(creativity) as creativity,
-                AVG(domain_knowledge) as domain_knowledge,
-                AVG(contextual) as contextual,
-                AVG(constraints) as constraints,
-                AVG(ambiguity) as ambiguity,
-                COUNT(*) as total
-            FROM complexity_scores
-        """).fetchone()
-
-        # Annotator stats with reliability
-        annotator_stats = conn.execute("""
-            SELECT u.username, u.display_name, u.role, 
-                   COUNT(DISTINCT c.example_id) as labeled,
-                   aa.reliability_score, aa.calibration_status
+        
+        # Annotations by user
+        user_counts = conn.execute("""
+            SELECT u.username, u.display_name, COUNT(DISTINCT c.example_id) as annotations
             FROM users u
             LEFT JOIN complexity_scores c ON u.id = c.annotator_id
-            LEFT JOIN annotator_agreement aa ON u.id = aa.user_id
+            WHERE u.id NOT IN (?, ?)
             GROUP BY u.id
-            HAVING labeled > 0
-            ORDER BY labeled DESC
+            ORDER BY annotations DESC
+        """, (ANONYMOUS_USER_ID, LEGACY_USER_ID)).fetchall()
+        
+        # Annotations by dataset
+        dataset_counts = conn.execute("""
+            SELECT e.dataset, COUNT(DISTINCT c.example_id) as annotations
+            FROM examples e
+            LEFT JOIN complexity_scores c ON e.id = c.example_id
+            GROUP BY e.dataset
+            ORDER BY annotations DESC
         """).fetchall()
-
-        # Active locks stats
-        lock_stats = conn.execute("""
-            SELECT COUNT(*) as active_locks,
-                   COUNT(DISTINCT locked_by) as users_with_locks
-            FROM example_locks
-        """).fetchone()
-
-        # Pool stats
-        pool_stats = conn.execute("""
-            SELECT pool_status, COUNT(*) as count
-            FROM examples
-            GROUP BY pool_status
-        """).fetchall()
-
-        # Agreement stats
-        agreement_stats = conn.execute("""
-            SELECT 
-                AVG(agreement_score) as avg_agreement,
-                COUNT(*) as examples_with_agreement
-            FROM example_agreement
-            WHERE agreement_score IS NOT NULL
-        """).fetchone()
-
-        # User-specific stats
-        user_stats = None
-        if user_id:
-            user_labeled = conn.execute("""
-                SELECT COUNT(*) as count FROM complexity_scores WHERE annotator_id = ?
-            """, (user_id,)).fetchone()
-            user_skipped = conn.execute("""
-                SELECT COUNT(*) as count FROM skipped WHERE annotator_id = ?
-            """, (user_id,)).fetchone()
-            user_custom = conn.execute("""
-                SELECT COUNT(*) as count FROM labels WHERE annotator_id = ? AND is_custom = 1
-            """, (user_id,)).fetchone()
-            user_locks = conn.execute("""
-                SELECT COUNT(*) as count FROM example_locks WHERE locked_by = ?
-            """, (user_id,)).fetchone()
-            user_agreement = conn.execute("""
-                SELECT agreement_with_consensus FROM annotator_agreement WHERE user_id = ?
-            """, (user_id,)).fetchone()
-            user_reliability = conn.execute("""
-                SELECT reliability_score, calibration_status, scored_annotation_count
-                FROM annotator_agreement WHERE user_id = ?
-            """, (user_id,)).fetchone()
-            
-            user_stats = {
-                "labeled": user_labeled["count"],
-                "skipped": user_skipped["count"],
-                "custom_labels_used": user_custom["count"],
-                "active_locks": user_locks["count"],
-                "agreement_with_consensus": user_agreement["agreement_with_consensus"] if user_agreement else None,
-                "reliability": {
-                    "reliability_score": user_reliability["reliability_score"] if user_reliability else None,
-                    "calibration_status": user_reliability["calibration_status"] if user_reliability else "provisional",
-                    "scored_annotation_count": user_reliability["scored_annotation_count"] if user_reliability else 0,
-                } if user_reliability else None
-            }
-
+        
         return {
-            "datasets": {
-                row["dataset"]: {"total": row["total"]}
-                for row in dataset_counts
-            },
-            "labeled": {
-                row["dataset"]: row["labeled"]
-                for row in labeled_counts
-            },
-            "skipped": {
-                row["dataset"]: row["skipped"]
-                for row in skipped_counts
-            },
-            "spans": {
-                "total_labels": span_stats["total_labels"],
-                "total_spans": span_stats["total_spans"],
-                "examples_with_spans": span_stats["examples_with_spans"]
-            },
+            "total_examples": total_examples,
+            "total_annotated": total_annotated,
+            "total_skipped": total_skipped,
             "labels": [
-                {"name": row["label_name"], "is_custom": bool(row["is_custom"]), "count": row["count"]}
-                for row in label_dist
+                {
+                    "name": row["label_name"],
+                    "count": row["count"],
+                    "is_custom": bool(row["is_custom"])
+                }
+                for row in label_counts
             ],
-            "custom_labels": {
-                "custom_count": custom_stats["custom_count"] or 0,
-                "system_count": custom_stats["system_count"] or 0,
-                "unique_custom_labels": custom_stats["unique_custom_labels"] or 0
-            },
-            "complexity_averages": {
-                "reasoning": score_avgs["reasoning"],
-                "creativity": score_avgs["creativity"],
-                "domain_knowledge": score_avgs["domain_knowledge"],
-                "contextual": score_avgs["contextual"],
-                "constraints": score_avgs["constraints"],
-                "ambiguity": score_avgs["ambiguity"],
-                "total_scored": score_avgs["total"]
-            },
-            "annotators": [
+            "users": [
                 {
                     "username": row["username"],
                     "display_name": row["display_name"],
-                    "role": row["role"],
-                    "labeled": row["labeled"],
-                    "reliability_score": row["reliability_score"],
-                    "calibration_status": row["calibration_status"] or "provisional"
+                    "annotations": row["annotations"]
                 }
-                for row in annotator_stats
+                for row in user_counts
             ],
-            "locks": {
-                "active_locks": lock_stats["active_locks"],
-                "users_with_locks": lock_stats["users_with_locks"]
-            },
-            "pools": {
-                row["pool_status"]: row["count"]
-                for row in pool_stats
-            },
-            "agreement": {
-                "avg_agreement_score": agreement_stats["avg_agreement"],
-                "examples_with_agreement": agreement_stats["examples_with_agreement"]
-            },
-            "user": user_stats
+            "datasets": [
+                {
+                    "name": row["dataset"],
+                    "annotations": row["annotations"]
+                }
+                for row in dataset_counts
+            ]
         }
 
 
 @app.get(
     "/api/export",
     tags=["Statistics"],
-    summary="Export all data (admin)",
-    description="Export all annotation data as JSON. Includes examples, labels, scores, and metadata. Admin only.",
+    summary="Export annotations",
+    description="Export all annotations in JSON format with optional filtering by dataset, user, or export mode (raw/deduplicated/consensus/gold).",
 )
-async def export_data(admin: dict = Depends(require_admin)):
-    """Export all annotation data."""
+async def export_annotations(
+    dataset: str = Query(None, description="Filter by dataset"),
+    user_id: int = Query(None, description="Filter by annotator user ID"),
+    mode: str = Query("raw", description="Export mode: raw, deduplicated, consensus, or gold"),
+    format: str = Query("json", description="Output format: json or csv"),
+    include_metadata: bool = Query(True, description="Include metadata fields"),
+    user: dict = Depends(get_current_user)
+):
+    """Export annotations with flexible filtering and modes."""
     with get_db() as conn:
-        # Get all examples
-        examples = conn.execute("SELECT * FROM examples").fetchall()
+        # Build query based on mode
+        if mode == "raw":
+            # Export all annotations as-is
+            query = """
+                SELECT e.*, l.label_name, l.label_color, l.is_custom,
+                       s.source, s.word_index, s.word_text,
+                       c.reasoning, c.creativity, c.domain_knowledge,
+                       c.contextual, c.constraints, c.ambiguity,
+                       u.username as annotator
+                FROM examples e
+                LEFT JOIN complexity_scores c ON e.id = c.example_id
+                LEFT JOIN labels l ON e.id = l.example_id AND c.annotator_id = l.annotator_id
+                LEFT JOIN span_selections s ON l.id = s.label_id
+                LEFT JOIN users u ON c.annotator_id = u.id
+                WHERE 1=1
+            """
+        elif mode == "deduplicated":
+            # One annotation per user per example
+            query = """
+                SELECT DISTINCT e.*, 
+                       c.reasoning, c.creativity, c.domain_knowledge,
+                       c.contextual, c.constraints, c.ambiguity,
+                       u.username as annotator
+                FROM examples e
+                INNER JOIN complexity_scores c ON e.id = c.example_id
+                INNER JOIN users u ON c.annotator_id = u.id
+                WHERE 1=1
+            """
+        elif mode == "consensus":
+            # Only examples with high agreement
+            query = """
+                SELECT e.*,
+                       AVG(c.reasoning) as reasoning,
+                       AVG(c.creativity) as creativity,
+                       AVG(c.domain_knowledge) as domain_knowledge,
+                       AVG(c.contextual) as contextual,
+                       AVG(c.constraints) as constraints,
+                       AVG(c.ambiguity) as ambiguity,
+                       ea.agreement_score,
+                       ea.annotation_count
+                FROM examples e
+                INNER JOIN complexity_scores c ON e.id = c.example_id
+                INNER JOIN example_agreement ea ON e.id = ea.example_id
+                WHERE ea.agreement_score >= ?
+                GROUP BY e.id
+            """
+        elif mode == "gold":
+            # Only examples in test pool
+            query = """
+                SELECT e.*,
+                       AVG(c.reasoning) as reasoning,
+                       AVG(c.creativity) as creativity,
+                       AVG(c.domain_knowledge) as domain_knowledge,
+                       AVG(c.contextual) as contextual,
+                       AVG(c.constraints) as constraints,
+                       AVG(c.ambiguity) as ambiguity,
+                       ea.agreement_score,
+                       ea.annotation_count
+                FROM examples e
+                INNER JOIN complexity_scores c ON e.id = c.example_id
+                INNER JOIN example_agreement ea ON e.id = ea.example_id
+                WHERE e.pool_status = 'test'
+                GROUP BY e.id
+            """
+        else:
+            raise HTTPException(400, f"Invalid export mode: {mode}")
         
-        # Get all labels with spans
-        all_data = []
-        for ex in examples:
-            labels = conn.execute("""
-                SELECT l.annotator_id, u.username, l.label_name, l.label_color, l.is_custom,
-                       s.source, s.word_index, s.word_text, s.char_start, s.char_end
-                FROM labels l
-                JOIN users u ON l.annotator_id = u.id
-                LEFT JOIN span_selections s ON s.label_id = l.id
-                WHERE l.example_id = ?
-            """, (ex["id"],)).fetchall()
-            
-            scores = conn.execute("""
-                SELECT c.annotator_id, u.username, c.reasoning, c.creativity, 
-                       c.domain_knowledge, c.contextual, c.constraints, c.ambiguity
-                FROM complexity_scores c
-                JOIN users u ON c.annotator_id = u.id
-                WHERE c.example_id = ?
-            """, (ex["id"],)).fetchall()
-            
-            all_data.append({
-                "example": dict(ex),
-                "labels": [dict(l) for l in labels],
-                "scores": [dict(s) for s in scores]
-            })
+        # Add filters
+        params = []
+        if mode in ["consensus"]:
+            params.append(AGREEMENT_HIGH_THRESHOLD)
         
-        return {"data": all_data, "total_examples": len(examples)}
+        if dataset:
+            query += " AND e.dataset = ?"
+            params.append(dataset)
+        
+        if user_id and mode == "raw":
+            query += " AND c.annotator_id = ?"
+            params.append(user_id)
+        
+        # Execute query
+        rows = conn.execute(query, params).fetchall()
+        
+        # Format results
+        if format == "json":
+            # Group by example for raw mode
+            if mode == "raw":
+                examples_dict = defaultdict(lambda: {
+                    "id": None,
+                    "dataset": None,
+                    "premise": None,
+                    "hypothesis": None,
+                    "gold_label": None,
+                    "gold_label_text": None,
+                    "annotations": []
+                })
+                
+                for row in rows:
+                    ex_id = row["id"]
+                    if examples_dict[ex_id]["id"] is None:
+                        examples_dict[ex_id]["id"] = row["id"]
+                        examples_dict[ex_id]["dataset"] = row["dataset"]
+                        examples_dict[ex_id]["premise"] = row["premise"]
+                        examples_dict[ex_id]["hypothesis"] = row["hypothesis"]
+                        examples_dict[ex_id]["gold_label"] = row["gold_label"]
+                        examples_dict[ex_id]["gold_label_text"] = row["gold_label_text"]
+                    
+                    # Check if this annotation already exists
+                    annotator = row.get("annotator")
+                    existing_ann = None
+                    for ann in examples_dict[ex_id]["annotations"]:
+                        if ann.get("annotator") == annotator:
+                            existing_ann = ann
+                            break
+                    
+                    if existing_ann is None:
+                        existing_ann = {
+                            "annotator": annotator,
+                            "complexity_scores": {
+                                "reasoning": row.get("reasoning"),
+                                "creativity": row.get("creativity"),
+                                "domain_knowledge": row.get("domain_knowledge"),
+                                "contextual": row.get("contextual"),
+                                "constraints": row.get("constraints"),
+                                "ambiguity": row.get("ambiguity")
+                            },
+                            "labels": []
+                        }
+                        examples_dict[ex_id]["annotations"].append(existing_ann)
+                    
+                    # Add label/span if exists
+                    if row.get("label_name"):
+                        # Find or create label
+                        label = None
+                        for lbl in existing_ann["labels"]:
+                            if lbl["label_name"] == row["label_name"]:
+                                label = lbl
+                                break
+                        
+                        if label is None:
+                            label = {
+                                "label_name": row["label_name"],
+                                "label_color": row["label_color"],
+                                "is_custom": bool(row["is_custom"]),
+                                "spans": []
+                            }
+                            existing_ann["labels"].append(label)
+                        
+                        # Add span
+                        if row.get("source"):
+                            label["spans"].append({
+                                "source": row["source"],
+                                "word_index": row["word_index"],
+                                "word_text": row["word_text"]
+                            })
+                
+                result = list(examples_dict.values())
+            else:
+                # Simple list for other modes
+                result = [dict(row) for row in rows]
+            
+            return {
+                "mode": mode,
+                "count": len(result),
+                "examples": result
+            }
+        
+        elif format == "csv":
+            # Convert to CSV format
+            import csv
+            import io
+            
+            output = io.StringIO()
+            
+            if mode == "raw":
+                fieldnames = ["id", "dataset", "premise", "hypothesis", "gold_label", "gold_label_text",
+                             "annotator", "reasoning", "creativity", "domain_knowledge", 
+                             "contextual", "constraints", "ambiguity"]
+            else:
+                fieldnames = ["id", "dataset", "premise", "hypothesis", "gold_label", "gold_label_text",
+                             "reasoning", "creativity", "domain_knowledge", 
+                             "contextual", "constraints", "ambiguity"]
+                
+                if mode in ["consensus", "gold"]:
+                    fieldnames.extend(["agreement_score", "annotation_count"])
+            
+            writer = csv.DictWriter(output, fieldnames=fieldnames)
+            writer.writeheader()
+            
+            for row in rows:
+                row_dict = {k: row[k] for k in fieldnames if k in row.keys()}
+                writer.writerow(row_dict)
+            
+            return Response(content=output.getvalue(), media_type="text/csv",
+                          headers={"Content-Disposition": f"attachment; filename=annotations_{mode}.csv"})
+        
+        else:
+            raise HTTPException(400, f"Invalid format: {format}")
 
 
 if __name__ == "__main__":
