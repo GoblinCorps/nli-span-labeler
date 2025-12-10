@@ -2003,6 +2003,272 @@ async def admin_get_calibration_config(admin: dict = Depends(require_admin)):
         }
 
 
+@app.get(
+    "/api/admin/user/{user_id}/annotations",
+    tags=["Admin"],
+    summary="Get user's annotations for review (admin)",
+    description="""Get a user's annotations with consensus comparison for quality review.
+
+Supports filtering by:
+- `dataset`: Filter by specific dataset
+- `disagreements_only`: Only show examples where user disagreed with consensus
+- `limit/offset`: Pagination
+""",
+)
+async def admin_get_user_annotations(
+    user_id: int,
+    dataset: Optional[str] = Query(None, description="Filter by dataset"),
+    disagreements_only: bool = Query(False, description="Only show disagreements"),
+    limit: int = Query(20, ge=1, le=100, description="Max results"),
+    offset: int = Query(0, ge=0, description="Offset for pagination"),
+    admin: dict = Depends(require_admin)
+):
+    """Get user's annotations with consensus comparison."""
+    with get_db() as conn:
+        # Verify user exists
+        user = conn.execute(
+            "SELECT id, username, display_name FROM users WHERE id = ?",
+            (user_id,)
+        ).fetchone()
+        if not user:
+            raise HTTPException(404, f"User not found: {user_id}")
+
+        # Build query for user's annotated examples
+        query = """
+            SELECT DISTINCT
+                e.id, e.dataset, e.premise, e.hypothesis, e.gold_label, e.gold_label_text,
+                e.pool_status,
+                ea.annotation_count, ea.agreement_score,
+                c.created_at as annotation_date
+            FROM complexity_scores c
+            JOIN examples e ON c.example_id = e.id
+            LEFT JOIN example_agreement ea ON e.id = ea.example_id
+            WHERE c.annotator_id = ?
+        """
+        params = [user_id]
+
+        if dataset:
+            query += " AND e.dataset = ?"
+            params.append(dataset)
+
+        if disagreements_only:
+            # Only examples with consensus where user might disagree
+            query += " AND ea.annotation_count >= ? AND ea.agreement_score < 1.0"
+            params.append(CONSENSUS_THRESHOLD)
+
+        query += " ORDER BY c.created_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        examples = conn.execute(query, params).fetchall()
+
+        # Get total count
+        count_query = """
+            SELECT COUNT(DISTINCT e.id)
+            FROM complexity_scores c
+            JOIN examples e ON c.example_id = e.id
+            LEFT JOIN example_agreement ea ON e.id = ea.example_id
+            WHERE c.annotator_id = ?
+        """
+        count_params = [user_id]
+        if dataset:
+            count_query += " AND e.dataset = ?"
+            count_params.append(dataset)
+        if disagreements_only:
+            count_query += " AND ea.annotation_count >= ? AND ea.agreement_score < 1.0"
+            count_params.append(CONSENSUS_THRESHOLD)
+
+        total = conn.execute(count_query, count_params).fetchone()[0]
+
+        # Build response with annotation details
+        results = []
+        for ex in examples:
+            example_id = ex["id"]
+
+            # Get user's labels for this example
+            user_labels = conn.execute("""
+                SELECT l.label_name, l.label_color, l.is_custom,
+                       s.source, s.word_index, s.word_text
+                FROM labels l
+                LEFT JOIN span_selections s ON s.label_id = l.id
+                WHERE l.example_id = ? AND l.annotator_id = ?
+            """, (example_id, user_id)).fetchall()
+
+            # Get user's complexity scores
+            user_scores = conn.execute("""
+                SELECT reasoning, creativity, domain_knowledge, contextual, constraints, ambiguity
+                FROM complexity_scores WHERE example_id = ? AND annotator_id = ?
+            """, (example_id, user_id)).fetchone()
+
+            # Get consensus labels (if available)
+            consensus_labels = []
+            if ex["annotation_count"] and ex["annotation_count"] >= CONSENSUS_THRESHOLD:
+                consensus_data = get_consensus_labels(conn, example_id)
+                consensus_labels = consensus_data.get("labels", [])
+
+            # Get other annotators' count
+            other_annotators = conn.execute("""
+                SELECT COUNT(DISTINCT annotator_id) as count
+                FROM complexity_scores
+                WHERE example_id = ? AND annotator_id != ?
+            """, (example_id, user_id)).fetchone()["count"]
+
+            # Format user labels
+            label_dict = defaultdict(lambda: {"label_name": "", "label_color": "", "is_custom": False, "spans": []})
+            for row in user_labels:
+                label_name = row['label_name']
+                label_dict[label_name]['label_name'] = label_name
+                label_dict[label_name]['label_color'] = row['label_color']
+                label_dict[label_name]['is_custom'] = bool(row['is_custom'])
+                if row['source']:
+                    label_dict[label_name]['spans'].append({
+                        "source": row['source'],
+                        "word_index": row['word_index'],
+                        "word_text": row['word_text']
+                    })
+
+            results.append({
+                "example_id": example_id,
+                "dataset": ex["dataset"],
+                "premise": ex["premise"],
+                "hypothesis": ex["hypothesis"],
+                "gold_label": ex["gold_label"],
+                "gold_label_text": ex["gold_label_text"],
+                "pool_status": ex["pool_status"],
+                "annotation_date": ex["annotation_date"],
+                "annotation_count": ex["annotation_count"],
+                "agreement_score": ex["agreement_score"],
+                "other_annotators": other_annotators,
+                "user_annotation": {
+                    "labels": list(label_dict.values()),
+                    "complexity_scores": dict(user_scores) if user_scores else None
+                },
+                "consensus": {
+                    "labels": consensus_labels,
+                    "available": ex["annotation_count"] >= CONSENSUS_THRESHOLD if ex["annotation_count"] else False
+                }
+            })
+
+        return {
+            "user": {
+                "id": user["id"],
+                "username": user["username"],
+                "display_name": user["display_name"]
+            },
+            "annotations": results,
+            "total": total,
+            "limit": limit,
+            "offset": offset
+        }
+
+
+@app.get(
+    "/api/admin/user/{user_id}/disagreements",
+    tags=["Admin"],
+    summary="Get user's disagreements with consensus (admin)",
+    description="Get examples where user's annotation significantly differs from consensus.",
+)
+async def admin_get_user_disagreements(
+    user_id: int,
+    dataset: Optional[str] = Query(None, description="Filter by dataset"),
+    limit: int = Query(20, ge=1, le=100, description="Max results"),
+    admin: dict = Depends(require_admin)
+):
+    """Get examples where user disagreed with consensus."""
+    with get_db() as conn:
+        # Verify user exists
+        user = conn.execute(
+            "SELECT id, username, display_name FROM users WHERE id = ?",
+            (user_id,)
+        ).fetchone()
+        if not user:
+            raise HTTPException(404, f"User not found: {user_id}")
+
+        # Get examples where user annotated and consensus exists with low agreement
+        query = """
+            SELECT DISTINCT
+                e.id, e.dataset, e.premise, e.hypothesis,
+                e.gold_label, e.gold_label_text,
+                ea.annotation_count, ea.agreement_score,
+                ea.complexity_agreement, ea.span_agreement
+            FROM complexity_scores c
+            JOIN examples e ON c.example_id = e.id
+            JOIN example_agreement ea ON e.id = ea.example_id
+            WHERE c.annotator_id = ?
+            AND ea.annotation_count >= ?
+            AND ea.agreement_score < ?
+        """
+        params = [user_id, CONSENSUS_THRESHOLD, AGREEMENT_HIGH_THRESHOLD]
+
+        if dataset:
+            query += " AND e.dataset = ?"
+            params.append(dataset)
+
+        query += " ORDER BY ea.agreement_score ASC LIMIT ?"
+        params.append(limit)
+
+        examples = conn.execute(query, params).fetchall()
+
+        results = []
+        for ex in examples:
+            example_id = ex["id"]
+
+            # Get annotator count for this example
+            annotator_ids = conn.execute("""
+                SELECT DISTINCT annotator_id FROM complexity_scores WHERE example_id = ?
+            """, (example_id,)).fetchall()
+
+            # Check if user's labels differ from majority
+            user_labels = set()
+            user_label_rows = conn.execute("""
+                SELECT DISTINCT label_name FROM labels
+                WHERE example_id = ? AND annotator_id = ?
+            """, (example_id, user_id)).fetchall()
+            user_labels = {row["label_name"] for row in user_label_rows}
+
+            # Get most common labels from other annotators
+            other_labels = conn.execute("""
+                SELECT label_name, COUNT(DISTINCT annotator_id) as annotator_count
+                FROM labels
+                WHERE example_id = ? AND annotator_id != ?
+                GROUP BY label_name
+                ORDER BY annotator_count DESC
+            """, (example_id, user_id)).fetchall()
+
+            majority_labels = {row["label_name"] for row in other_labels if row["annotator_count"] > len(annotator_ids) // 2}
+
+            # Identify disagreements
+            missing_labels = majority_labels - user_labels
+            extra_labels = user_labels - majority_labels
+
+            results.append({
+                "example_id": example_id,
+                "dataset": ex["dataset"],
+                "premise": ex["premise"][:200] + "..." if len(ex["premise"]) > 200 else ex["premise"],
+                "hypothesis": ex["hypothesis"][:200] + "..." if len(ex["hypothesis"]) > 200 else ex["hypothesis"],
+                "gold_label": ex["gold_label"],
+                "agreement_score": ex["agreement_score"],
+                "annotation_count": ex["annotation_count"],
+                "user_labels": list(user_labels),
+                "majority_labels": list(majority_labels),
+                "missing_labels": list(missing_labels),
+                "extra_labels": list(extra_labels),
+                "disagreement_severity": len(missing_labels) + len(extra_labels)
+            })
+
+        # Sort by severity
+        results.sort(key=lambda x: x["disagreement_severity"], reverse=True)
+
+        return {
+            "user": {
+                "id": user["id"],
+                "username": user["username"],
+                "display_name": user["display_name"]
+            },
+            "disagreements": results,
+            "total": len(results)
+        }
+
+
 # ============================================================================
 # API Endpoints - System
 # ============================================================================
