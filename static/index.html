@@ -1178,6 +1178,209 @@
         .hotspot-row:hover {
             background: rgba(248, 113, 113, 0.1) !important;
         }
+
+        /* Training Mode Styles */
+        .training-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: var(--bg-dark);
+            z-index: 1000;
+            overflow-y: auto;
+            padding: 20px;
+        }
+
+        .training-container {
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+
+        .training-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #333;
+        }
+
+        .training-header h2 {
+            color: var(--accent);
+        }
+
+        .training-progress {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .progress-bar-container {
+            width: 200px;
+            height: 8px;
+            background: #333;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .progress-bar {
+            height: 100%;
+            background: var(--success);
+            transition: width 0.3s ease;
+        }
+
+        .training-instructions {
+            background: rgba(74, 158, 255, 0.1);
+            border: 1px solid rgba(74, 158, 255, 0.3);
+        }
+
+        .training-instructions p {
+            margin-bottom: 10px;
+        }
+
+        .training-instructions p:last-child {
+            margin-bottom: 0;
+        }
+
+        .training-feedback {
+            background: var(--bg-card);
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+
+        .feedback-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .accuracy-badge {
+            font-size: 1.2rem;
+            font-weight: bold;
+            padding: 5px 15px;
+            border-radius: 20px;
+        }
+
+        .accuracy-badge.good {
+            background: rgba(74, 222, 128, 0.2);
+            color: var(--success);
+        }
+
+        .accuracy-badge.fair {
+            background: rgba(251, 191, 36, 0.2);
+            color: var(--warning);
+        }
+
+        .accuracy-badge.poor {
+            background: rgba(248, 113, 113, 0.2);
+            color: var(--danger);
+        }
+
+        .feedback-comparison {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .feedback-column {
+            background: rgba(0, 0, 0, 0.2);
+            padding: 15px;
+            border-radius: 8px;
+        }
+
+        .feedback-column h4 {
+            margin-bottom: 10px;
+            color: var(--text-secondary);
+        }
+
+        .feedback-score-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .feedback-score-row.match {
+            color: var(--success);
+        }
+
+        .feedback-score-row.close {
+            color: var(--warning);
+        }
+
+        .feedback-score-row.off {
+            color: var(--danger);
+        }
+
+        .feedback-explanation {
+            background: rgba(74, 158, 255, 0.1);
+            border-left: 3px solid var(--accent);
+            padding: 15px;
+            border-radius: 0 8px 8px 0;
+            margin-bottom: 20px;
+        }
+
+        .training-complete {
+            text-align: center;
+            padding: 40px;
+        }
+
+        .training-complete h2 {
+            color: var(--success);
+            margin-bottom: 20px;
+        }
+
+        .training-complete p {
+            margin-bottom: 15px;
+        }
+
+        /* Gold Examples Admin Tab */
+        .gold-examples-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .gold-example-card {
+            background: rgba(0, 0, 0, 0.2);
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            border-left: 3px solid var(--warning);
+        }
+
+        .gold-example-card .example-text {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+            margin-bottom: 10px;
+        }
+
+        .gold-example-card .explanation {
+            font-style: italic;
+            color: var(--text-secondary);
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .gold-scores {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .gold-score-chip {
+            background: rgba(251, 191, 36, 0.2);
+            color: var(--warning);
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+        }
     </style>
 </head>
 <body>
@@ -1511,6 +1714,79 @@
             <button class="nav-tab" data-tab="lookup" onclick="switchTab('lookup')">Lookup</button>
             <button class="nav-tab admin-only hidden" data-tab="admin" id="admin-tab-btn" onclick="switchTab('admin')">📊 Admin Dashboard</button>
             <button class="nav-tab admin-only hidden" data-tab="quality-review" onclick="switchTab('quality-review')">🔍 Quality Review</button>
+            <button class="nav-tab admin-only hidden" data-tab="gold-examples" onclick="switchTab('gold-examples')">📚 Gold Examples</button>
+        </div>
+
+        <!-- Training Mode Overlay -->
+        <div id="training-overlay" class="training-overlay hidden">
+            <div class="training-container">
+                <div class="training-header">
+                    <h2>🎓 Training Mode</h2>
+                    <div class="training-progress">
+                        <div class="progress-bar-container">
+                            <div class="progress-bar" id="training-progress-bar" style="width: 0%"></div>
+                        </div>
+                        <span id="training-progress-text">0 / 5 completed</span>
+                    </div>
+                </div>
+
+                <div class="training-instructions card">
+                    <p>Welcome! Before you start annotating, please complete a short training to familiarize yourself with the labeling process.</p>
+                    <p>You'll annotate <strong id="training-required-count">5</strong> gold-standard examples and receive feedback on each one.</p>
+                </div>
+
+                <div id="training-example-area" class="card">
+                    <div class="loading">Loading training example...</div>
+                </div>
+
+                <!-- Training Labels Section -->
+                <div class="card labels-section">
+                    <div class="labels-header">
+                        <h3>Span Labels</h3>
+                    </div>
+                    <div class="labels-grid" id="training-labels-grid"></div>
+                    <div class="legend" id="training-legend"></div>
+                </div>
+
+                <!-- Training Complexity Scores -->
+                <div class="card complexity-section">
+                    <h3 style="margin-bottom: 15px;">Complexity Scores (1-100)</h3>
+                    <div class="complexity-grid" id="training-complexity-grid"></div>
+                </div>
+
+                <!-- Training Actions -->
+                <div class="actions">
+                    <button class="btn btn-success" onclick="submitTrainingAnnotation()">Submit & Get Feedback</button>
+                </div>
+
+                <!-- Feedback Panel (shown after submission) -->
+                <div id="training-feedback" class="training-feedback hidden">
+                    <div class="feedback-header">
+                        <h3>Feedback</h3>
+                        <span class="accuracy-badge" id="feedback-accuracy">0%</span>
+                    </div>
+                    <div class="feedback-comparison">
+                        <div class="feedback-column">
+                            <h4>Your Scores</h4>
+                            <div id="feedback-your-scores"></div>
+                        </div>
+                        <div class="feedback-column">
+                            <h4>Gold Standard</h4>
+                            <div id="feedback-gold-scores"></div>
+                        </div>
+                    </div>
+                    <div class="feedback-explanation" id="feedback-explanation"></div>
+                    <button class="btn btn-primary" onclick="continueTraining()">Continue</button>
+                </div>
+
+                <!-- Training Complete Panel -->
+                <div id="training-complete" class="training-complete hidden">
+                    <h2>🎉 Training Complete!</h2>
+                    <p>Your training accuracy: <strong id="training-final-accuracy">0%</strong></p>
+                    <p>You can now start annotating real examples.</p>
+                    <button class="btn btn-success" onclick="finishTraining()">Start Annotating</button>
+                </div>
+            </div>
         </div>
 
         <!-- Labeler Tab -->
@@ -1743,6 +2019,30 @@
                     </div>
                     <div id="annotation-detail-content"></div>
                 </div>
+            </div>
+        </div>
+
+        <!-- Gold Examples Admin Tab -->
+        <div id="gold-examples-tab" class="tab-content hidden">
+            <div class="gold-examples-header">
+                <h2>📚 Gold Examples</h2>
+                <div>
+                    <span id="gold-count">0</span> gold examples configured
+                    (need <span id="gold-required">5</span> for training)
+                </div>
+            </div>
+
+            <div class="card">
+                <p style="margin-bottom: 15px;">Gold examples are used to train new annotators. Each example needs:</p>
+                <ul style="margin-left: 20px; margin-bottom: 15px;">
+                    <li>Gold-standard complexity scores (the "correct" answers)</li>
+                    <li>An explanation of why these are the correct scores</li>
+                </ul>
+                <p>To add a gold example, annotate any example in the Quality Review tab and click "Mark as Gold".</p>
+            </div>
+
+            <div id="gold-examples-list">
+                <div class="loading">Loading gold examples...</div>
             </div>
         </div>
     </div>
@@ -3647,6 +3947,300 @@
                 closeAnnotationDetail();
             }
         });
+
+        // ============================================================================
+        // Training Mode Functions
+        // ============================================================================
+
+        let trainingExample = null;
+        let trainingComplexityScores = {};
+        let trainingProgress = { completed: 0, required: 5 };
+
+        async function checkTrainingStatus() {
+            try {
+                const response = await fetch('/api/training/status');
+                if (!response.ok) return;
+
+                const data = await response.json();
+                if (data.training_enabled && data.training_required && data.available_gold_examples >= data.required) {
+                    trainingProgress.completed = data.completed;
+                    trainingProgress.required = data.required;
+                    showTrainingMode();
+                }
+            } catch (e) {
+                console.error('Failed to check training status:', e);
+            }
+        }
+
+        function showTrainingMode() {
+            document.getElementById('training-overlay').classList.remove('hidden');
+            document.getElementById('training-required-count').textContent = trainingProgress.required;
+            updateTrainingProgress();
+            loadNextTrainingExample();
+        }
+
+        function hideTrainingMode() {
+            document.getElementById('training-overlay').classList.add('hidden');
+        }
+
+        function updateTrainingProgress() {
+            const pct = (trainingProgress.completed / trainingProgress.required) * 100;
+            document.getElementById('training-progress-bar').style.width = pct + '%';
+            document.getElementById('training-progress-text').textContent =
+                `${trainingProgress.completed} / ${trainingProgress.required} completed`;
+        }
+
+        async function loadNextTrainingExample() {
+            const area = document.getElementById('training-example-area');
+            area.innerHTML = '<div class="loading">Loading training example...</div>';
+
+            // Hide feedback panel
+            document.getElementById('training-feedback').classList.add('hidden');
+            document.getElementById('training-complete').classList.add('hidden');
+
+            try {
+                const response = await fetch('/api/training/next');
+                const data = await response.json();
+
+                if (data.training_complete) {
+                    showTrainingComplete(data);
+                    return;
+                }
+
+                trainingExample = data.example;
+                renderTrainingExample(data.example);
+                initTrainingComplexityScores();
+            } catch (e) {
+                area.innerHTML = '<div class="error">Failed to load training example: ' + e.message + '</div>';
+            }
+        }
+
+        function renderTrainingExample(example) {
+            const area = document.getElementById('training-example-area');
+            area.innerHTML = `
+                <div class="example-header">
+                    <span class="example-id">${example.dataset} / ${example.id}</span>
+                    ${example.gold_label ? `<span class="gold-label" style="background: var(--accent); color: white;">${example.gold_label}</span>` : ''}
+                </div>
+                <div class="text-pair">
+                    <div class="text-block">
+                        <div class="text-label">Premise</div>
+                        <div class="text-content">${example.premise}</div>
+                    </div>
+                    <div class="text-block">
+                        <div class="text-label">Hypothesis</div>
+                        <div class="text-content">${example.hypothesis}</div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function initTrainingComplexityScores() {
+            trainingComplexityScores = {
+                reasoning: 50,
+                creativity: 50,
+                domain_knowledge: 50,
+                contextual: 50,
+                constraints: 50,
+                ambiguity: 50
+            };
+
+            const grid = document.getElementById('training-complexity-grid');
+            const dimensions = [
+                { key: 'reasoning', label: 'Reasoning', desc: 'Logical inference required' },
+                { key: 'creativity', label: 'Creativity', desc: 'Imaginative interpretation' },
+                { key: 'domain_knowledge', label: 'Domain Knowledge', desc: 'Specialized expertise' },
+                { key: 'contextual', label: 'Contextual', desc: 'Implicit context' },
+                { key: 'constraints', label: 'Constraints', desc: 'Multiple conditions' },
+                { key: 'ambiguity', label: 'Ambiguity', desc: 'Answer is debatable' }
+            ];
+
+            grid.innerHTML = dimensions.map(d => `
+                <div class="complexity-item">
+                    <label title="${d.desc}">${d.label}</label>
+                    <input type="range" min="1" max="100" value="50"
+                           oninput="updateTrainingScore('${d.key}', this.value)">
+                    <span class="score-value" id="training-score-${d.key}">50</span>
+                </div>
+            `).join('');
+        }
+
+        function updateTrainingScore(key, value) {
+            trainingComplexityScores[key] = parseInt(value);
+            document.getElementById(`training-score-${key}`).textContent = value;
+        }
+
+        async function submitTrainingAnnotation() {
+            if (!trainingExample) return;
+
+            try {
+                const response = await fetch('/api/training/submit', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        example_id: trainingExample.id,
+                        complexity_scores: trainingComplexityScores,
+                        labels: []
+                    })
+                });
+
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail);
+
+                trainingProgress.completed = data.progress.completed;
+                updateTrainingProgress();
+                showTrainingFeedback(data);
+            } catch (e) {
+                alert('Failed to submit: ' + e.message);
+            }
+        }
+
+        function showTrainingFeedback(data) {
+            const feedback = document.getElementById('training-feedback');
+            feedback.classList.remove('hidden');
+
+            // Set accuracy badge
+            const accuracyBadge = document.getElementById('feedback-accuracy');
+            accuracyBadge.textContent = data.accuracy + '%';
+            accuracyBadge.className = 'accuracy-badge';
+            if (data.accuracy >= 80) accuracyBadge.classList.add('good');
+            else if (data.accuracy >= 50) accuracyBadge.classList.add('fair');
+            else accuracyBadge.classList.add('poor');
+
+            // Render score comparison
+            const yourScores = document.getElementById('feedback-your-scores');
+            const goldScores = document.getElementById('feedback-gold-scores');
+
+            const dimensions = ['reasoning', 'creativity', 'domain_knowledge', 'contextual', 'constraints', 'ambiguity'];
+
+            yourScores.innerHTML = dimensions.map(d => {
+                const yours = data.feedback.your_scores[d] || 0;
+                const gold = data.feedback.gold_scores[d] || 0;
+                const diff = Math.abs(yours - gold);
+                const cls = diff <= 10 ? 'match' : diff <= 25 ? 'close' : 'off';
+                return `<div class="feedback-score-row ${cls}"><span>${d.replace('_', ' ')}</span><span>${yours}</span></div>`;
+            }).join('');
+
+            goldScores.innerHTML = dimensions.map(d => {
+                const gold = data.feedback.gold_scores[d] || 0;
+                return `<div class="feedback-score-row"><span>${d.replace('_', ' ')}</span><span>${gold}</span></div>`;
+            }).join('');
+
+            // Show explanation
+            const explanation = document.getElementById('feedback-explanation');
+            if (data.feedback.explanation) {
+                explanation.innerHTML = `<strong>Explanation:</strong> ${data.feedback.explanation}`;
+                explanation.style.display = 'block';
+            } else {
+                explanation.style.display = 'none';
+            }
+
+            // Check if training complete
+            if (data.progress.training_complete) {
+                document.querySelector('#training-feedback .btn-primary').textContent = 'Finish Training';
+            }
+        }
+
+        function continueTraining() {
+            if (trainingProgress.completed >= trainingProgress.required) {
+                showTrainingComplete({ completed: trainingProgress.completed, required: trainingProgress.required });
+            } else {
+                loadNextTrainingExample();
+            }
+        }
+
+        function showTrainingComplete(data) {
+            document.getElementById('training-example-area').style.display = 'none';
+            document.querySelector('.training-overlay .labels-section').style.display = 'none';
+            document.querySelector('.training-overlay .complexity-section').style.display = 'none';
+            document.querySelector('.training-overlay .actions').style.display = 'none';
+            document.getElementById('training-feedback').classList.add('hidden');
+            document.getElementById('training-complete').classList.remove('hidden');
+
+            // Get final accuracy
+            fetch('/api/training/progress')
+                .then(r => r.json())
+                .then(progress => {
+                    document.getElementById('training-final-accuracy').textContent =
+                        (progress.average_accuracy || 0) + '%';
+                });
+        }
+
+        function finishTraining() {
+            hideTrainingMode();
+            loadNextExample();
+        }
+
+        // ============================================================================
+        // Gold Examples Admin Functions
+        // ============================================================================
+
+        async function loadGoldExamples() {
+            try {
+                const response = await fetch('/api/admin/gold');
+                if (!response.ok) throw new Error('Failed to load gold examples');
+
+                const data = await response.json();
+                document.getElementById('gold-count').textContent = data.total;
+                document.getElementById('gold-required').textContent = data.training_min_examples;
+
+                const list = document.getElementById('gold-examples-list');
+                if (data.gold_examples.length === 0) {
+                    list.innerHTML = '<p style="color: var(--text-secondary);">No gold examples configured yet.</p>';
+                    return;
+                }
+
+                list.innerHTML = data.gold_examples.map(ex => `
+                    <div class="gold-example-card">
+                        <div class="example-text">
+                            <strong>Premise:</strong> ${ex.premise}<br>
+                            <strong>Hypothesis:</strong> ${ex.hypothesis}
+                        </div>
+                        <div class="gold-scores">
+                            ${Object.entries(ex.gold_complexity_scores).map(([k, v]) =>
+                                `<span class="gold-score-chip">${k}: ${v}</span>`
+                            ).join('')}
+                        </div>
+                        ${ex.explanation ? `<div class="explanation">${ex.explanation}</div>` : ''}
+                        <div style="margin-top: 10px;">
+                            <button class="btn btn-danger btn-small" onclick="removeGoldExample('${ex.example_id}')">Remove Gold Status</button>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (e) {
+                document.getElementById('gold-examples-list').innerHTML =
+                    '<p style="color: var(--danger);">Failed to load gold examples: ' + e.message + '</p>';
+            }
+        }
+
+        async function removeGoldExample(exampleId) {
+            if (!confirm('Remove gold status from this example?')) return;
+
+            try {
+                const response = await fetch(`/api/admin/gold/${exampleId}`, { method: 'DELETE' });
+                if (!response.ok) throw new Error('Failed to remove gold status');
+
+                loadGoldExamples();
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
+        }
+
+        // Hook into tab switching
+        const originalSwitchTab = switchTab;
+        switchTab = function(tabName) {
+            originalSwitchTab(tabName);
+            if (tabName === 'gold-examples') {
+                loadGoldExamples();
+            }
+        };
+
+        // Check training status after login
+        const originalOnLoginSuccess = onLoginSuccess;
+        onLoginSuccess = async function(user) {
+            await originalOnLoginSuccess(user);
+            checkTrainingStatus();
+        };
     </script>
 </body>
 </html>

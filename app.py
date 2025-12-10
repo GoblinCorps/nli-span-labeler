@@ -91,6 +91,10 @@ CALIBRATION_ROUTING_ENABLED = os.environ.get("CALIBRATION_ROUTING_ENABLED", "1")
 CALIBRATION_TEST_RATIO_NEW = float(os.environ.get("CALIBRATION_TEST_RATIO_NEW", "0.8"))  # 80% test questions for new users
 CALIBRATION_TEST_RATIO_ESTABLISHED = float(os.environ.get("CALIBRATION_TEST_RATIO_ESTABLISHED", "0.1"))  # 10% for drift detection
 
+# Training configuration
+TRAINING_ENABLED = os.environ.get("TRAINING_ENABLED", "1") == "1"
+TRAINING_MIN_EXAMPLES = int(os.environ.get("TRAINING_MIN_EXAMPLES", "5"))  # Gold examples required to complete training
+
 # ============================================================================
 # Label Schema Configuration
 # ============================================================================
@@ -374,6 +378,13 @@ def init_db():
             columns = [row[1] for row in cursor.fetchall()]
             needs_pool_migration = 'pool_status' not in columns
 
+        # Check if users table needs training columns
+        needs_training_migration = False
+        if users_exist:
+            cursor = conn.execute("PRAGMA table_info(users)")
+            columns = [row[1] for row in cursor.fetchall()]
+            needs_training_migration = 'training_required' not in columns
+
         # Create users table first (needed for foreign keys)
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS users (
@@ -555,6 +566,40 @@ def init_db():
                 CREATE INDEX IF NOT EXISTS idx_complexity_annotator ON complexity_scores(annotator_id);
                 CREATE INDEX IF NOT EXISTS idx_skipped_annotator ON skipped(annotator_id);
             """)
+
+        # Create gold annotations table for training mode
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS gold_annotations (
+                example_id TEXT PRIMARY KEY,
+                gold_complexity_scores TEXT NOT NULL,
+                gold_labels TEXT,
+                explanation TEXT,
+                created_by INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (example_id) REFERENCES examples(id) ON DELETE CASCADE,
+                FOREIGN KEY (created_by) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS training_submissions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                example_id TEXT NOT NULL,
+                submitted_complexity_scores TEXT NOT NULL,
+                submitted_labels TEXT,
+                accuracy_score REAL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (example_id) REFERENCES examples(id) ON DELETE CASCADE,
+                UNIQUE(user_id, example_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_gold_example ON gold_annotations(example_id);
+            CREATE INDEX IF NOT EXISTS idx_training_user ON training_submissions(user_id);
+        """)
+
+        # Add training columns to users table if needed
+        if needs_training_migration:
+            migrate_add_training_columns(conn)
 
 
 def migrate_add_role(conn):
@@ -759,6 +804,22 @@ def migrate_add_reliability_columns(conn):
     """, (CALIBRATION_MIN_SCORED,))
 
     print("Migration complete. Reliability columns added and initialized.")
+
+
+def migrate_add_training_columns(conn):
+    """Add training columns to existing users table."""
+    print("Adding training columns to users table...")
+
+    conn.execute("ALTER TABLE users ADD COLUMN training_required BOOLEAN DEFAULT 1")
+    conn.execute("ALTER TABLE users ADD COLUMN training_completed_at TIMESTAMP")
+
+    # Mark existing users as not requiring training (they're already active)
+    conn.execute("""
+        UPDATE users SET training_required = 0
+        WHERE id NOT IN (?, ?)
+    """, (ANONYMOUS_USER_ID, LEGACY_USER_ID))
+
+    print("Migration complete. Existing users marked as training complete.")
 
 
 @contextmanager
@@ -2000,6 +2061,480 @@ async def admin_get_calibration_config(admin: dict = Depends(require_admin)):
                 "provisional": status_counts.get("provisional", 0),
                 "calibrated": status_counts.get("calibrated", 0)
             }
+        }
+
+
+# ============================================================================
+# Gold Example Management Endpoints
+# ============================================================================
+
+class GoldAnnotationCreate(BaseModel):
+    """Request model for creating a gold annotation."""
+    example_id: str
+    gold_complexity_scores: dict = Field(..., description="Gold standard complexity scores")
+    gold_labels: Optional[list] = Field(None, description="Gold standard labels (optional)")
+    explanation: Optional[str] = Field(None, description="Explanation of why this is the correct answer")
+
+
+@app.get(
+    "/api/admin/gold",
+    tags=["Admin"],
+    summary="List gold examples",
+    description="List all examples marked as gold standard for training.",
+)
+async def list_gold_examples(
+    admin: dict = Depends(require_admin)
+):
+    """List all gold examples."""
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT
+                g.example_id,
+                g.gold_complexity_scores,
+                g.gold_labels,
+                g.explanation,
+                g.created_by,
+                g.created_at,
+                e.dataset,
+                e.premise,
+                e.hypothesis,
+                u.username as created_by_username
+            FROM gold_annotations g
+            JOIN examples e ON g.example_id = e.id
+            JOIN users u ON g.created_by = u.id
+            ORDER BY g.created_at DESC
+        """).fetchall()
+
+        gold_examples = []
+        for row in rows:
+            gold_examples.append({
+                "example_id": row["example_id"],
+                "gold_complexity_scores": json.loads(row["gold_complexity_scores"]),
+                "gold_labels": json.loads(row["gold_labels"]) if row["gold_labels"] else None,
+                "explanation": row["explanation"],
+                "dataset": row["dataset"],
+                "premise": row["premise"],
+                "hypothesis": row["hypothesis"],
+                "created_by": row["created_by_username"],
+                "created_at": row["created_at"]
+            })
+
+        return {
+            "gold_examples": gold_examples,
+            "total": len(gold_examples),
+            "training_min_examples": TRAINING_MIN_EXAMPLES
+        }
+
+
+@app.post(
+    "/api/admin/gold",
+    tags=["Admin"],
+    summary="Mark example as gold",
+    description="Mark an example as a gold standard with correct answers for training.",
+)
+async def create_gold_example(
+    gold: GoldAnnotationCreate,
+    admin: dict = Depends(require_admin)
+):
+    """Create a gold annotation for an example."""
+    with get_db() as conn:
+        # Verify example exists
+        example = conn.execute(
+            "SELECT id FROM examples WHERE id = ?", (gold.example_id,)
+        ).fetchone()
+        if not example:
+            raise HTTPException(status_code=404, detail="Example not found")
+
+        # Check if already gold
+        existing = conn.execute(
+            "SELECT example_id FROM gold_annotations WHERE example_id = ?",
+            (gold.example_id,)
+        ).fetchone()
+        if existing:
+            raise HTTPException(status_code=400, detail="Example is already marked as gold")
+
+        # Insert gold annotation
+        conn.execute("""
+            INSERT INTO gold_annotations (example_id, gold_complexity_scores, gold_labels, explanation, created_by)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            gold.example_id,
+            json.dumps(gold.gold_complexity_scores),
+            json.dumps(gold.gold_labels) if gold.gold_labels else None,
+            gold.explanation,
+            admin["id"]
+        ))
+
+        # Move example to test pool (gold examples are used for calibration)
+        conn.execute(
+            "UPDATE examples SET pool_status = 'test' WHERE id = ?",
+            (gold.example_id,)
+        )
+
+        conn.commit()
+
+        return {
+            "success": True,
+            "example_id": gold.example_id,
+            "message": "Example marked as gold and moved to test pool"
+        }
+
+
+@app.put(
+    "/api/admin/gold/{example_id}",
+    tags=["Admin"],
+    summary="Update gold example",
+    description="Update the gold annotation for an example.",
+)
+async def update_gold_example(
+    example_id: str,
+    gold: GoldAnnotationCreate,
+    admin: dict = Depends(require_admin)
+):
+    """Update a gold annotation."""
+    with get_db() as conn:
+        existing = conn.execute(
+            "SELECT example_id FROM gold_annotations WHERE example_id = ?",
+            (example_id,)
+        ).fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail="Gold annotation not found")
+
+        conn.execute("""
+            UPDATE gold_annotations
+            SET gold_complexity_scores = ?, gold_labels = ?, explanation = ?
+            WHERE example_id = ?
+        """, (
+            json.dumps(gold.gold_complexity_scores),
+            json.dumps(gold.gold_labels) if gold.gold_labels else None,
+            gold.explanation,
+            example_id
+        ))
+        conn.commit()
+
+        return {
+            "success": True,
+            "example_id": example_id,
+            "message": "Gold annotation updated"
+        }
+
+
+@app.delete(
+    "/api/admin/gold/{example_id}",
+    tags=["Admin"],
+    summary="Remove gold status",
+    description="Remove gold status from an example.",
+)
+async def delete_gold_example(
+    example_id: str,
+    admin: dict = Depends(require_admin)
+):
+    """Remove gold status from an example."""
+    with get_db() as conn:
+        result = conn.execute(
+            "DELETE FROM gold_annotations WHERE example_id = ?",
+            (example_id,)
+        )
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Gold annotation not found")
+
+        # Move back to building pool if it has annotations, otherwise zero_entry
+        has_annotations = conn.execute(
+            "SELECT COUNT(*) as count FROM complexity_scores WHERE example_id = ?",
+            (example_id,)
+        ).fetchone()["count"]
+
+        new_pool = "building" if has_annotations > 0 else "zero_entry"
+        conn.execute(
+            "UPDATE examples SET pool_status = ? WHERE id = ?",
+            (new_pool, example_id)
+        )
+
+        conn.commit()
+
+        return {
+            "success": True,
+            "example_id": example_id,
+            "new_pool_status": new_pool,
+            "message": "Gold status removed"
+        }
+
+
+# ============================================================================
+# Training Mode Endpoints
+# ============================================================================
+
+class TrainingSubmission(BaseModel):
+    """Request model for submitting a training annotation."""
+    example_id: str
+    complexity_scores: dict = Field(..., description="Submitted complexity scores")
+    labels: Optional[list] = Field(None, description="Submitted labels (optional)")
+
+
+@app.get(
+    "/api/training/status",
+    tags=["Training"],
+    summary="Get training status",
+    description="Check if the current user needs training and their progress.",
+)
+async def get_training_status(user: dict = Depends(get_current_user)):
+    """Get current user's training status."""
+    if not TRAINING_ENABLED:
+        return {
+            "training_enabled": False,
+            "training_required": False,
+            "completed": 0,
+            "required": 0
+        }
+
+    with get_db() as conn:
+        # Check if user needs training
+        user_row = conn.execute(
+            "SELECT training_required, training_completed_at FROM users WHERE id = ?",
+            (user["id"],)
+        ).fetchone()
+
+        training_required = bool(user_row["training_required"]) if user_row else True
+
+        # Get training progress
+        completed = conn.execute(
+            "SELECT COUNT(*) as count FROM training_submissions WHERE user_id = ?",
+            (user["id"],)
+        ).fetchone()["count"]
+
+        # Get total gold examples available
+        total_gold = conn.execute(
+            "SELECT COUNT(*) as count FROM gold_annotations"
+        ).fetchone()["count"]
+
+        return {
+            "training_enabled": TRAINING_ENABLED,
+            "training_required": training_required,
+            "completed": completed,
+            "required": TRAINING_MIN_EXAMPLES,
+            "available_gold_examples": total_gold,
+            "training_completed_at": user_row["training_completed_at"] if user_row else None
+        }
+
+
+@app.get(
+    "/api/training/next",
+    tags=["Training"],
+    summary="Get next training example",
+    description="Get the next gold example for training. Only returns examples the user hasn't completed.",
+)
+async def get_next_training_example(user: dict = Depends(get_current_user)):
+    """Get next training example for the user."""
+    if not TRAINING_ENABLED:
+        raise HTTPException(status_code=400, detail="Training mode is disabled")
+
+    with get_db() as conn:
+        # Find gold examples the user hasn't completed
+        row = conn.execute("""
+            SELECT
+                g.example_id,
+                e.dataset,
+                e.premise,
+                e.hypothesis,
+                e.gold_label_text
+            FROM gold_annotations g
+            JOIN examples e ON g.example_id = e.id
+            WHERE g.example_id NOT IN (
+                SELECT example_id FROM training_submissions WHERE user_id = ?
+            )
+            ORDER BY RANDOM()
+            LIMIT 1
+        """, (user["id"],)).fetchone()
+
+        if not row:
+            # Check if training is complete
+            completed = conn.execute(
+                "SELECT COUNT(*) as count FROM training_submissions WHERE user_id = ?",
+                (user["id"],)
+            ).fetchone()["count"]
+
+            if completed >= TRAINING_MIN_EXAMPLES:
+                return {
+                    "training_complete": True,
+                    "completed": completed,
+                    "required": TRAINING_MIN_EXAMPLES
+                }
+            else:
+                raise HTTPException(
+                    status_code=404,
+                    detail="No more training examples available. Contact admin to add more gold examples."
+                )
+
+        # Tokenize the example
+        tokenizer = get_tokenizer()
+        tokens = tokenize_text(tokenizer, row["premise"], row["hypothesis"])
+
+        return {
+            "training_complete": False,
+            "example": {
+                "id": row["example_id"],
+                "dataset": row["dataset"],
+                "premise": row["premise"],
+                "hypothesis": row["hypothesis"],
+                "gold_label": row["gold_label_text"],
+                "tokens": tokens
+            }
+        }
+
+
+@app.post(
+    "/api/training/submit",
+    tags=["Training"],
+    summary="Submit training annotation",
+    description="Submit an annotation for a training example. Returns feedback comparing to gold standard.",
+)
+async def submit_training_annotation(
+    submission: TrainingSubmission,
+    user: dict = Depends(get_current_user)
+):
+    """Submit a training annotation and receive feedback."""
+    if not TRAINING_ENABLED:
+        raise HTTPException(status_code=400, detail="Training mode is disabled")
+
+    with get_db() as conn:
+        # Get gold annotation
+        gold = conn.execute("""
+            SELECT gold_complexity_scores, gold_labels, explanation
+            FROM gold_annotations WHERE example_id = ?
+        """, (submission.example_id,)).fetchone()
+
+        if not gold:
+            raise HTTPException(status_code=404, detail="Not a gold example")
+
+        # Check if already submitted
+        existing = conn.execute(
+            "SELECT id FROM training_submissions WHERE user_id = ? AND example_id = ?",
+            (user["id"], submission.example_id)
+        ).fetchone()
+        if existing:
+            raise HTTPException(status_code=400, detail="Already submitted for this example")
+
+        # Parse gold scores
+        gold_scores = json.loads(gold["gold_complexity_scores"])
+        gold_labels = json.loads(gold["gold_labels"]) if gold["gold_labels"] else []
+
+        # Calculate accuracy (simple average of score differences)
+        score_diffs = []
+        for key in ["reasoning", "creativity", "domain_knowledge", "contextual", "constraints", "ambiguity"]:
+            if key in gold_scores and key in submission.complexity_scores:
+                diff = abs(gold_scores[key] - submission.complexity_scores[key])
+                # Normalize to 0-1 where 0 is perfect match
+                score_diffs.append(1 - (diff / 100))
+
+        accuracy = sum(score_diffs) / len(score_diffs) if score_diffs else 0
+
+        # Save submission
+        conn.execute("""
+            INSERT INTO training_submissions (user_id, example_id, submitted_complexity_scores, submitted_labels, accuracy_score)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            user["id"],
+            submission.example_id,
+            json.dumps(submission.complexity_scores),
+            json.dumps(submission.labels) if submission.labels else None,
+            accuracy
+        ))
+
+        # Check if training is now complete
+        completed = conn.execute(
+            "SELECT COUNT(*) as count FROM training_submissions WHERE user_id = ?",
+            (user["id"],)
+        ).fetchone()["count"]
+
+        training_complete = completed >= TRAINING_MIN_EXAMPLES
+
+        if training_complete:
+            # Calculate overall training accuracy
+            avg_accuracy = conn.execute(
+                "SELECT AVG(accuracy_score) as avg FROM training_submissions WHERE user_id = ?",
+                (user["id"],)
+            ).fetchone()["avg"]
+
+            # Mark training as complete
+            conn.execute("""
+                UPDATE users
+                SET training_required = 0, training_completed_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (user["id"],))
+
+            # Set initial reliability score based on training accuracy
+            conn.execute("""
+                INSERT INTO annotator_agreement (user_id, reliability_score, calibration_status)
+                VALUES (?, ?, 'provisional')
+                ON CONFLICT(user_id) DO UPDATE SET
+                    reliability_score = excluded.reliability_score
+            """, (user["id"], avg_accuracy * 100))
+
+        conn.commit()
+
+        # Build feedback response
+        return {
+            "success": True,
+            "accuracy": round(accuracy * 100, 1),
+            "feedback": {
+                "your_scores": submission.complexity_scores,
+                "gold_scores": gold_scores,
+                "your_labels": submission.labels,
+                "gold_labels": gold_labels,
+                "explanation": gold["explanation"]
+            },
+            "progress": {
+                "completed": completed,
+                "required": TRAINING_MIN_EXAMPLES,
+                "training_complete": training_complete
+            }
+        }
+
+
+@app.get(
+    "/api/training/progress",
+    tags=["Training"],
+    summary="Get training progress",
+    description="Get detailed training progress including accuracy per example.",
+)
+async def get_training_progress(user: dict = Depends(get_current_user)):
+    """Get detailed training progress."""
+    with get_db() as conn:
+        submissions = conn.execute("""
+            SELECT
+                ts.example_id,
+                ts.accuracy_score,
+                ts.created_at,
+                e.dataset
+            FROM training_submissions ts
+            JOIN examples e ON ts.example_id = e.id
+            WHERE ts.user_id = ?
+            ORDER BY ts.created_at
+        """, (user["id"],)).fetchall()
+
+        total_gold = conn.execute(
+            "SELECT COUNT(*) as count FROM gold_annotations"
+        ).fetchone()["count"]
+
+        avg_accuracy = None
+        if submissions:
+            avg_accuracy = sum(s["accuracy_score"] for s in submissions) / len(submissions)
+
+        return {
+            "submissions": [
+                {
+                    "example_id": s["example_id"],
+                    "dataset": s["dataset"],
+                    "accuracy": round(s["accuracy_score"] * 100, 1),
+                    "submitted_at": s["created_at"]
+                }
+                for s in submissions
+            ],
+            "completed": len(submissions),
+            "required": TRAINING_MIN_EXAMPLES,
+            "available": total_gold,
+            "average_accuracy": round(avg_accuracy * 100, 1) if avg_accuracy else None,
+            "training_complete": len(submissions) >= TRAINING_MIN_EXAMPLES
         }
 
 
