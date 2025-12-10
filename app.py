@@ -31,6 +31,9 @@ Environment Variables:
     CONSENSUS_THRESHOLD=10  - Annotations needed before consensus calculation (default: 10)
     CALIBRATION_MIN_SCORED=5  - Scored annotations needed for "calibrated" status (default: 5)
     AGREEMENT_HIGH_THRESHOLD=0.8  - Agreement score to promote to test pool (default: 0.8)
+    CALIBRATION_ROUTING_ENABLED=1  - Enable stealth calibration routing (default: 1)
+    CALIBRATION_TEST_RATIO_NEW=0.8  - Test question ratio for new/provisional users (default: 0.8)
+    CALIBRATION_TEST_RATIO_ESTABLISHED=0.1  - Test question ratio for calibrated users (default: 0.1)
 """
 
 import json
@@ -38,6 +41,7 @@ import sqlite3
 import secrets
 import hashlib
 import os
+import random
 from pathlib import Path
 from typing import Optional
 from datetime import datetime, timedelta
@@ -81,6 +85,11 @@ RELIABILITY_COMPLEXITY_WEIGHT = 0.6  # Weight for complexity agreement in reliab
 RELIABILITY_SPAN_WEIGHT = 0.4  # Weight for span agreement in reliability score
 
 AGREEMENT_HIGH_THRESHOLD = float(os.environ.get("AGREEMENT_HIGH_THRESHOLD", "0.8"))
+
+# Calibration routing configuration
+CALIBRATION_ROUTING_ENABLED = os.environ.get("CALIBRATION_ROUTING_ENABLED", "1") == "1"
+CALIBRATION_TEST_RATIO_NEW = float(os.environ.get("CALIBRATION_TEST_RATIO_NEW", "0.8"))  # 80% test questions for new users
+CALIBRATION_TEST_RATIO_ESTABLISHED = float(os.environ.get("CALIBRATION_TEST_RATIO_ESTABLISHED", "0.1"))  # 10% for drift detection
 
 # ============================================================================
 # Label Schema Configuration
@@ -1281,6 +1290,37 @@ def get_lock_status(conn, example_id: str) -> Optional[dict]:
     }
 
 
+def get_user_calibration_status(conn, user_id: int) -> tuple[str, float]:
+    """
+    Get user's calibration status and determine test question ratio.
+
+    Returns:
+        (calibration_status, test_ratio)
+        - calibration_status: 'provisional' or 'calibrated'
+        - test_ratio: probability of serving a test question (0.0 to 1.0)
+    """
+    if not CALIBRATION_ROUTING_ENABLED:
+        return ('disabled', 0.0)
+
+    # Check user's calibration status
+    result = conn.execute("""
+        SELECT calibration_status, scored_annotation_count
+        FROM annotator_agreement WHERE user_id = ?
+    """, (user_id,)).fetchone()
+
+    if result is None or result['calibration_status'] == 'provisional':
+        # New or provisional user - high calibration ratio
+        return ('provisional', CALIBRATION_TEST_RATIO_NEW)
+    else:
+        # Calibrated user - occasional test questions for drift detection
+        return ('calibrated', CALIBRATION_TEST_RATIO_ESTABLISHED)
+
+
+def should_serve_test_question(test_ratio: float) -> bool:
+    """Random roll to decide if we should serve a test question."""
+    return random.random() < test_ratio
+
+
 def cleanup_expired_locks(conn):
     """Remove all expired locks."""
     now = datetime.now().isoformat()
@@ -1927,6 +1967,42 @@ async def admin_update_user_role(
         }
 
 
+@app.get(
+    "/api/admin/calibration",
+    tags=["Admin"],
+    summary="Get calibration routing config (admin)",
+    description="View current calibration routing configuration and test pool statistics.",
+)
+async def admin_get_calibration_config(admin: dict = Depends(require_admin)):
+    """Get calibration routing configuration and statistics."""
+    with get_db() as conn:
+        # Get test pool statistics
+        test_count = conn.execute(
+            "SELECT COUNT(*) as count FROM examples WHERE pool_status = 'test'"
+        ).fetchone()["count"]
+
+        # Get counts by calibration status
+        calibration_stats = conn.execute("""
+            SELECT calibration_status, COUNT(*) as count
+            FROM annotator_agreement
+            GROUP BY calibration_status
+        """).fetchall()
+
+        status_counts = {row["calibration_status"]: row["count"] for row in calibration_stats}
+
+        return {
+            "enabled": CALIBRATION_ROUTING_ENABLED,
+            "test_ratio_new": CALIBRATION_TEST_RATIO_NEW,
+            "test_ratio_established": CALIBRATION_TEST_RATIO_ESTABLISHED,
+            "calibration_threshold": CALIBRATION_MIN_SCORED,
+            "test_pool_size": test_count,
+            "annotator_counts": {
+                "provisional": status_counts.get("provisional", 0),
+                "calibrated": status_counts.get("calibrated", 0)
+            }
+        }
+
+
 # ============================================================================
 # API Endpoints - System
 # ============================================================================
@@ -2456,69 +2532,107 @@ async def get_reliability_leaderboard(
     "/api/next",
     tags=["Examples"],
     summary="Get next example to annotate",
-    description="Get the next unannotated example for the current user. Automatically locks the example. Prioritizes zero_entry pool, then building pool.",
+    description="""Get the next unannotated example for the current user. Automatically locks the example.
+
+**Calibration Routing:**
+- New/provisional users are routed to "test" pool questions (high consensus) for calibration
+- Calibrated users get normal routing with occasional test questions for drift detection
+- Routing is stealth - users don't know which questions are calibration
+- Configurable via CALIBRATION_TEST_RATIO_NEW and CALIBRATION_TEST_RATIO_ESTABLISHED
+
+**Pool Priority (when not serving test question):**
+1. zero_entry - Fresh examples, no annotations yet
+2. building - Being actively annotated, building consensus
+3. test - High consensus calibration questions (served based on calibration ratio)
+""",
     response_model=ExampleResponse,
 )
 async def get_next_example(
     dataset: str = Query(None, description="Filter by dataset (snli, mnli, anli, etc.)"),
     user: dict = Depends(get_current_user)
 ):
-    """Get the next example to annotate."""
+    """Get the next example to annotate with calibration-aware routing."""
     user_id = user["id"]
-    
+
     with get_db() as conn:
         # Clean up expired locks
         cleanup_expired_locks(conn)
-        
-        # Build query to find unannotated examples
-        # Priority: zero_entry > building
-        # Exclude: already annotated by user, skipped by user, locked by others
-        query = """
-            SELECT e.*, ea.annotation_count,
-                   CASE e.pool_status
-                       WHEN 'zero_entry' THEN 1
-                       WHEN 'building' THEN 2
-                       WHEN 'test' THEN 3
-                       ELSE 4
-                   END as pool_priority
-            FROM examples e
-            LEFT JOIN example_agreement ea ON e.id = ea.example_id
-            WHERE e.id NOT IN (
+
+        # Get user's calibration status and test question ratio
+        calibration_status, test_ratio = get_user_calibration_status(conn, user_id)
+        serve_test = should_serve_test_question(test_ratio)
+
+        # Base exclusion criteria (always apply)
+        base_exclusions = """
+            e.id NOT IN (
                 SELECT example_id FROM complexity_scores WHERE annotator_id = ?
             )
             AND e.id NOT IN (
                 SELECT example_id FROM skipped WHERE annotator_id = ?
             )
             AND e.id NOT IN (
-                SELECT example_id FROM example_locks 
+                SELECT example_id FROM example_locks
                 WHERE locked_by != ? AND locked_until > datetime('now')
             )
         """
-        
-        params = [user_id, user_id, user_id]
-        
-        if dataset:
-            query += " AND e.dataset = ?"
-            params.append(dataset)
-        
-        query += " ORDER BY pool_priority, RANDOM() LIMIT 1"
-        
-        row = conn.execute(query, params).fetchone()
-        
+
+        row = None
+
+        if serve_test:
+            # Try to serve a test question (high consensus, for calibration)
+            query = f"""
+                SELECT e.*, ea.annotation_count
+                FROM examples e
+                LEFT JOIN example_agreement ea ON e.id = ea.example_id
+                WHERE {base_exclusions}
+                AND e.pool_status = 'test'
+            """
+            params = [user_id, user_id, user_id]
+
+            if dataset:
+                query += " AND e.dataset = ?"
+                params.append(dataset)
+
+            query += " ORDER BY RANDOM() LIMIT 1"
+            row = conn.execute(query, params).fetchone()
+
+        if row is None:
+            # Fallback to normal routing: zero_entry > building > test
+            query = f"""
+                SELECT e.*, ea.annotation_count,
+                       CASE e.pool_status
+                           WHEN 'zero_entry' THEN 1
+                           WHEN 'building' THEN 2
+                           WHEN 'test' THEN 3
+                           ELSE 4
+                       END as pool_priority
+                FROM examples e
+                LEFT JOIN example_agreement ea ON e.id = ea.example_id
+                WHERE {base_exclusions}
+            """
+            params = [user_id, user_id, user_id]
+
+            if dataset:
+                query += " AND e.dataset = ?"
+                params.append(dataset)
+
+            query += " ORDER BY pool_priority, RANDOM() LIMIT 1"
+            row = conn.execute(query, params).fetchone()
+
         if not row:
             raise HTTPException(404, "No more examples to annotate")
-        
+
         # Acquire lock
         lock_until = acquire_lock(conn, row["id"], user_id)
-        
+
         # Get existing labels (shouldn't exist for next, but check anyway)
         existing_labels = []
         existing_scores = None
-        
+
         # Tokenize the texts
         premise_words = tokenize_text(row["premise"])
         hypothesis_words = tokenize_text(row["hypothesis"])
-        
+
         return ExampleResponse(
             id=row["id"],
             dataset=row["dataset"],
