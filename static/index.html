@@ -2645,8 +2645,8 @@
                         bVal = (b.display_name || b.username).toLowerCase();
                         break;
                     case 'reliability':
-                        aVal = a.reliability_score ?? -1;  // Null/undefined scores sort last
-                        bVal = b.reliability_score ?? -1;
+                        aVal = a.reliability_score !== null ? a.reliability_score : -1;
+                        bVal = b.reliability_score !== null ? b.reliability_score : -1;
                         break;
                     case 'labeled':
                     default:
@@ -2655,80 +2655,51 @@
                         break;
                 }
 
-                if (aVal < bVal) return leaderboardSortDirection === 'asc' ? -1 : 1;
-                if (aVal > bVal) return leaderboardSortDirection === 'asc' ? 1 : -1;
-                return 0;
+                if (leaderboardSortDirection === 'asc') {
+                    return aVal > bVal ? 1 : aVal < bVal ? -1 : 0;
+                } else {
+                    return aVal < bVal ? 1 : aVal > bVal ? -1 : 0;
+                }
             });
 
             return data;
         }
 
         function sortLeaderboard(column) {
-            if (column === 'rank') {
-                // Rank always sorts by labeled desc
-                leaderboardSortColumn = 'labeled';
-                leaderboardSortDirection = 'desc';
-            } else if (leaderboardSortColumn === column) {
+            if (leaderboardSortColumn === column) {
                 // Toggle direction
                 leaderboardSortDirection = leaderboardSortDirection === 'asc' ? 'desc' : 'asc';
             } else {
+                // New column - default to desc for labeled, asc for others
                 leaderboardSortColumn = column;
                 leaderboardSortDirection = column === 'labeled' || column === 'reliability' ? 'desc' : 'asc';
             }
 
+            // Re-render leaderboard
             renderLeaderboard(leaderboardData);
         }
 
-        async function showStats() {
-            switchTab('stats');
-        }
+        // ============================================================================
+        // Export / Lookup
+        // ============================================================================
 
         async function exportLabels() {
             try {
                 const resp = await authenticatedFetch('/api/export');
                 const blob = await resp.blob();
-                const url = URL.createObjectURL(blob);
+                const url = window.URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = 'annotations.jsonl';
+                a.download = `annotations_${new Date().toISOString()}.jsonl`;
                 a.click();
-                URL.revokeObjectURL(url);
+                window.URL.revokeObjectURL(url);
+                showMessage('Export downloaded!', 'success');
             } catch (e) {
-                showMessage(`Error: ${e.message}`, 'error');
+                showMessage(`Export error: ${e.message}`, 'error');
             }
         }
 
-        async function lookupExample() {
-            const dataset = document.getElementById('lookup-dataset').value.trim();
-            const id = document.getElementById('lookup-id').value.trim();
-            const resultArea = document.getElementById('lookup-result');
-
-            if (!id) {
-                resultArea.innerHTML = '<div class="message error">Please enter an example ID</div>';
-                return;
-            }
-
-            try {
-                const url = dataset ? `/api/example/${dataset}/${id}` : `/api/example/unknown/${id}`;
-                const resp = await authenticatedFetch(url);
-
-                if (!resp.ok) {
-                    const err = await resp.json();
-                    resultArea.innerHTML = `<div class="message error">${err.detail}</div>`;
-                    return;
-                }
-
-                const data = await resp.json();
-                currentExample = data;
-                switchTab('labeler');
-                resetLabelsForNewExample();
-                renderExample();
-                resetFocus();
-                showMessage(`Loaded example ${id}`, 'success');
-            } catch (e) {
-                resultArea.innerHTML = `<div class="message error">Error: ${e.message}</div>`;
-            }
-        }
+        function showStats() { switchTab('stats'); }
     </script>
 </body>
 </html>
