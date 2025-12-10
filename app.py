@@ -2003,6 +2003,323 @@ async def admin_get_calibration_config(admin: dict = Depends(require_admin)):
         }
 
 
+@app.get(
+    "/api/admin/dashboard",
+    tags=["Admin"],
+    summary="Get admin dashboard metrics",
+    description="""
+Comprehensive dashboard metrics for project administrators.
+
+**Metrics included:**
+- Total annotations across all users
+- Annotations per day/week (activity data)
+- Per-dataset completion percentages
+- Per-user contribution breakdown with reliability scores
+- Label distribution
+- Average complexity scores
+- Active user counts (24h/7d)
+- Quality indicators (overlap, disagreement hotspots)
+- Question pool status
+
+Filterable by date range and dataset.
+    """,
+)
+async def admin_dashboard(
+    dataset: Optional[str] = Query(None, description="Filter by dataset"),
+    days: int = Query(30, description="Number of days for activity data", ge=1, le=365),
+    admin: dict = Depends(require_admin)
+):
+    """Get comprehensive admin dashboard metrics."""
+
+    with get_db() as conn:
+        # Calculate date boundaries
+        now = datetime.now()
+        start_date = (now - timedelta(days=days)).isoformat()
+        day_ago = (now - timedelta(days=1)).isoformat()
+        week_ago = (now - timedelta(days=7)).isoformat()
+
+        # Base dataset filter
+        dataset_filter = "AND e.dataset = ?" if dataset else ""
+        dataset_params = [dataset] if dataset else []
+
+        # =====================================================================
+        # Overview Metrics
+        # =====================================================================
+
+        # Total annotations
+        total_annotations = conn.execute(f"""
+            SELECT COUNT(*) as count FROM complexity_scores c
+            JOIN examples e ON c.example_id = e.id
+            WHERE 1=1 {dataset_filter}
+        """, dataset_params).fetchone()["count"]
+
+        # Total examples
+        total_examples = conn.execute(f"""
+            SELECT COUNT(*) as count FROM examples e
+            WHERE 1=1 {dataset_filter}
+        """, dataset_params).fetchone()["count"]
+
+        # Annotated examples (unique)
+        annotated_examples = conn.execute(f"""
+            SELECT COUNT(DISTINCT c.example_id) as count
+            FROM complexity_scores c
+            JOIN examples e ON c.example_id = e.id
+            WHERE 1=1 {dataset_filter}
+        """, dataset_params).fetchone()["count"]
+
+        # Completion percentage
+        completion_pct = round((annotated_examples / total_examples * 100), 1) if total_examples > 0 else 0
+
+        # =====================================================================
+        # Activity Over Time
+        # =====================================================================
+
+        # Annotations per day (last N days)
+        activity_query = f"""
+            SELECT DATE(c.created_at) as date, COUNT(*) as count
+            FROM complexity_scores c
+            JOIN examples e ON c.example_id = e.id
+            WHERE c.created_at >= ? {dataset_filter}
+            GROUP BY DATE(c.created_at)
+            ORDER BY date
+        """
+        activity_rows = conn.execute(activity_query, [start_date] + dataset_params).fetchall()
+        daily_activity = [{"date": row["date"], "count": row["count"]} for row in activity_rows]
+
+        # Weekly aggregation
+        weekly_query = f"""
+            SELECT strftime('%Y-W%W', c.created_at) as week, COUNT(*) as count
+            FROM complexity_scores c
+            JOIN examples e ON c.example_id = e.id
+            WHERE c.created_at >= ? {dataset_filter}
+            GROUP BY week
+            ORDER BY week
+        """
+        weekly_rows = conn.execute(weekly_query, [start_date] + dataset_params).fetchall()
+        weekly_activity = [{"week": row["week"], "count": row["count"]} for row in weekly_rows]
+
+        # =====================================================================
+        # Per-Dataset Breakdown
+        # =====================================================================
+
+        dataset_stats = conn.execute("""
+            SELECT
+                e.dataset,
+                COUNT(DISTINCT e.id) as total_examples,
+                COUNT(DISTINCT c.example_id) as annotated_examples,
+                COUNT(c.id) as total_annotations
+            FROM examples e
+            LEFT JOIN complexity_scores c ON e.id = c.example_id
+            GROUP BY e.dataset
+            ORDER BY e.dataset
+        """).fetchall()
+
+        datasets = []
+        for row in dataset_stats:
+            annotated = row["annotated_examples"] or 0
+            total = row["total_examples"]
+            datasets.append({
+                "name": row["dataset"],
+                "total_examples": total,
+                "annotated_examples": annotated,
+                "total_annotations": row["total_annotations"] or 0,
+                "completion_pct": round((annotated / total * 100), 1) if total > 0 else 0
+            })
+
+        # =====================================================================
+        # Per-User Breakdown
+        # =====================================================================
+
+        user_stats = conn.execute(f"""
+            SELECT
+                u.id, u.username, u.display_name, u.role, u.last_seen,
+                COUNT(DISTINCT c.example_id) as annotations,
+                aa.reliability_score,
+                aa.calibration_status,
+                aa.agreement_with_consensus
+            FROM users u
+            LEFT JOIN complexity_scores c ON u.id = c.annotator_id
+            LEFT JOIN annotator_agreement aa ON u.id = aa.user_id
+            LEFT JOIN examples e ON c.example_id = e.id
+            WHERE u.id NOT IN (?, ?) {dataset_filter}
+            GROUP BY u.id
+            HAVING annotations > 0
+            ORDER BY annotations DESC
+        """, [ANONYMOUS_USER_ID, LEGACY_USER_ID] + dataset_params).fetchall()
+
+        annotators = []
+        for row in user_stats:
+            annotators.append({
+                "id": row["id"],
+                "username": row["username"],
+                "display_name": row["display_name"],
+                "role": row["role"],
+                "annotations": row["annotations"],
+                "reliability_score": row["reliability_score"],
+                "calibration_status": row["calibration_status"],
+                "agreement_with_consensus": row["agreement_with_consensus"],
+                "last_seen": row["last_seen"]
+            })
+
+        # =====================================================================
+        # Active Users
+        # =====================================================================
+
+        active_24h = conn.execute(f"""
+            SELECT COUNT(DISTINCT c.annotator_id) as count
+            FROM complexity_scores c
+            JOIN examples e ON c.example_id = e.id
+            WHERE c.created_at >= ? {dataset_filter}
+        """, [day_ago] + dataset_params).fetchone()["count"]
+
+        active_7d = conn.execute(f"""
+            SELECT COUNT(DISTINCT c.annotator_id) as count
+            FROM complexity_scores c
+            JOIN examples e ON c.example_id = e.id
+            WHERE c.created_at >= ? {dataset_filter}
+        """, [week_ago] + dataset_params).fetchone()["count"]
+
+        # =====================================================================
+        # Label Distribution
+        # =====================================================================
+
+        label_dist = conn.execute(f"""
+            SELECT l.label_name, l.is_custom, COUNT(*) as count
+            FROM labels l
+            JOIN examples e ON l.example_id = e.id
+            WHERE 1=1 {dataset_filter}
+            GROUP BY l.label_name, l.is_custom
+            ORDER BY count DESC
+        """, dataset_params).fetchall()
+
+        labels = [
+            {"name": row["label_name"], "is_custom": bool(row["is_custom"]), "count": row["count"]}
+            for row in label_dist
+        ]
+
+        # =====================================================================
+        # Complexity Score Averages
+        # =====================================================================
+
+        complexity_avgs = conn.execute(f"""
+            SELECT
+                AVG(c.reasoning) as reasoning,
+                AVG(c.creativity) as creativity,
+                AVG(c.domain_knowledge) as domain_knowledge,
+                AVG(c.contextual) as contextual,
+                AVG(c.constraints) as constraints,
+                AVG(c.ambiguity) as ambiguity
+            FROM complexity_scores c
+            JOIN examples e ON c.example_id = e.id
+            WHERE 1=1 {dataset_filter}
+        """, dataset_params).fetchone()
+
+        complexity_scores = {
+            "reasoning": round(complexity_avgs["reasoning"], 1) if complexity_avgs["reasoning"] else None,
+            "creativity": round(complexity_avgs["creativity"], 1) if complexity_avgs["creativity"] else None,
+            "domain_knowledge": round(complexity_avgs["domain_knowledge"], 1) if complexity_avgs["domain_knowledge"] else None,
+            "contextual": round(complexity_avgs["contextual"], 1) if complexity_avgs["contextual"] else None,
+            "constraints": round(complexity_avgs["constraints"], 1) if complexity_avgs["constraints"] else None,
+            "ambiguity": round(complexity_avgs["ambiguity"], 1) if complexity_avgs["ambiguity"] else None,
+        }
+
+        # =====================================================================
+        # Quality Indicators
+        # =====================================================================
+
+        # Examples with multiple annotations (overlap)
+        overlap_stats = conn.execute(f"""
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN annotation_count >= 2 THEN 1 ELSE 0 END) as with_overlap,
+                SUM(CASE WHEN annotation_count >= {CONSENSUS_THRESHOLD} THEN 1 ELSE 0 END) as at_consensus
+            FROM example_agreement ea
+            JOIN examples e ON ea.example_id = e.id
+            WHERE 1=1 {dataset_filter}
+        """, dataset_params).fetchone()
+
+        # Disagreement hotspots (low agreement with multiple annotations)
+        disagreement_hotspots = conn.execute(f"""
+            SELECT ea.example_id, e.dataset, ea.annotation_count, ea.agreement_score
+            FROM example_agreement ea
+            JOIN examples e ON ea.example_id = e.id
+            WHERE ea.annotation_count >= 3 AND ea.agreement_score < 0.5 {dataset_filter}
+            ORDER BY ea.agreement_score ASC
+            LIMIT 10
+        """, dataset_params).fetchall()
+
+        hotspots = [
+            {
+                "example_id": row["example_id"],
+                "dataset": row["dataset"],
+                "annotation_count": row["annotation_count"],
+                "agreement_score": row["agreement_score"]
+            }
+            for row in disagreement_hotspots
+        ]
+
+        # Custom label usage
+        custom_label_count = conn.execute(f"""
+            SELECT COUNT(*) as count FROM labels l
+            JOIN examples e ON l.example_id = e.id
+            WHERE l.is_custom = 1 {dataset_filter}
+        """, dataset_params).fetchone()["count"]
+
+        # =====================================================================
+        # Question Pool Status
+        # =====================================================================
+
+        pool_stats = conn.execute(f"""
+            SELECT pool_status, COUNT(*) as count
+            FROM examples e
+            WHERE 1=1 {dataset_filter}
+            GROUP BY pool_status
+        """, dataset_params).fetchall()
+
+        pools = {row["pool_status"]: row["count"] for row in pool_stats}
+
+        # =====================================================================
+        # Build Response
+        # =====================================================================
+
+        return {
+            "generated_at": now.isoformat(),
+            "filters": {
+                "dataset": dataset,
+                "days": days
+            },
+            "overview": {
+                "total_annotations": total_annotations,
+                "total_examples": total_examples,
+                "annotated_examples": annotated_examples,
+                "completion_pct": completion_pct,
+                "active_users_24h": active_24h,
+                "active_users_7d": active_7d,
+                "total_annotators": len(annotators)
+            },
+            "activity": {
+                "daily": daily_activity,
+                "weekly": weekly_activity
+            },
+            "datasets": datasets,
+            "annotators": annotators,
+            "labels": labels,
+            "complexity_averages": complexity_scores,
+            "quality": {
+                "examples_with_overlap": overlap_stats["with_overlap"] or 0,
+                "examples_at_consensus": overlap_stats["at_consensus"] or 0,
+                "disagreement_hotspots": hotspots,
+                "custom_label_usage": custom_label_count
+            },
+            "pools": {
+                "test": pools.get("test", 0),
+                "building": pools.get("building", 0),
+                "zero_entry": pools.get("zero_entry", 0),
+                "consensus_threshold": CONSENSUS_THRESHOLD
+            }
+        }
+
+
 # ============================================================================
 # API Endpoints - System
 # ============================================================================
