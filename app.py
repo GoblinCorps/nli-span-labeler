@@ -17,6 +17,7 @@ Features:
 - Example locking for concurrent multi-user annotation
 - Role-based admin mode with protected endpoints
 - Inter-annotator agreement metrics and question pools
+- Annotator reliability scoring with cold-start calibration
 
 Usage:
     cd nli-span-labeler
@@ -30,6 +31,7 @@ Environment Variables:
     ADMIN_USER=username  - Bootstrap admin user (gets admin role on startup)
     CONSENSUS_THRESHOLD=10  - Annotations needed before consensus calculation (default: 10)
     AGREEMENT_HIGH_THRESHOLD=0.8  - Agreement score to promote to test pool (default: 0.8)
+    CALIBRATION_MIN_SCORED=5  - Scored annotations needed for "calibrated" status (default: 5)
 """
 
 import json
@@ -75,6 +77,11 @@ ROLE_ANNOTATOR = "annotator"
 # Agreement configuration
 CONSENSUS_THRESHOLD = int(os.environ.get("CONSENSUS_THRESHOLD", "10"))
 AGREEMENT_HIGH_THRESHOLD = float(os.environ.get("AGREEMENT_HIGH_THRESHOLD", "0.8"))
+
+# Reliability scoring configuration
+CALIBRATION_MIN_SCORED = int(os.environ.get("CALIBRATION_MIN_SCORED", "5"))  # Min scored annotations to be "calibrated"
+RELIABILITY_COMPLEXITY_WEIGHT = 0.6  # Weight for complexity agreement in reliability score
+RELIABILITY_SPAN_WEIGHT = 0.4  # Weight for span agreement in reliability score
 
 # ============================================================================
 # Label Schema Configuration
@@ -219,6 +226,10 @@ TAGS_METADATA = [
         "description": "Inter-annotator agreement metrics and question pool management.",
     },
     {
+        "name": "Reliability",
+        "description": "Annotator reliability scoring and leaderboard data.",
+    },
+    {
         "name": "Statistics",
         "description": "View annotation statistics, export data, and manage annotators.",
     },
@@ -231,7 +242,7 @@ TAGS_METADATA = [
 app = FastAPI(
     title="NLI Span Labeler API",
     description=API_DESCRIPTION,
-    version="1.3.0",
+    version="1.4.0",
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_tags=TAGS_METADATA,
@@ -348,6 +359,17 @@ def init_db():
             columns = [row[1] for row in cursor.fetchall()]
             needs_pool_migration = 'pool_status' not in columns
 
+        # Check if annotator_agreement table needs reliability columns
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='annotator_agreement'"
+        )
+        annotator_agreement_exist = cursor.fetchone() is not None
+        needs_reliability_migration = False
+        if annotator_agreement_exist:
+            cursor = conn.execute("PRAGMA table_info(annotator_agreement)")
+            columns = [row[1] for row in cursor.fetchall()]
+            needs_reliability_migration = 'reliability_score' not in columns
+
         # Create users table first (needed for foreign keys)
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS users (
@@ -447,13 +469,21 @@ def init_db():
                 agreement_with_consensus REAL,
                 complexity_agreement REAL,
                 span_agreement REAL,
+                reliability_score REAL,
+                calibration_status TEXT DEFAULT 'provisional',
+                scored_annotation_count INTEGER DEFAULT 0,
                 last_calculated TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
 
             CREATE INDEX IF NOT EXISTS idx_example_agreement_score ON example_agreement(agreement_score);
             CREATE INDEX IF NOT EXISTS idx_annotator_agreement_score ON annotator_agreement(agreement_with_consensus);
+            CREATE INDEX IF NOT EXISTS idx_annotator_reliability ON annotator_agreement(reliability_score);
         """)
+
+        # Add reliability columns to existing annotator_agreement table if needed
+        if needs_reliability_migration:
+            migrate_add_reliability_columns(conn)
 
         # Handle migration for existing tables
         if needs_user_migration and labels_exist:
@@ -693,6 +723,32 @@ def migrate_add_pool_status(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_examples_pool ON examples(pool_status)")
     
     print("Migration complete. Existing annotated examples moved to 'building' pool.")
+
+
+def migrate_add_reliability_columns(conn):
+    """Add reliability scoring columns to existing annotator_agreement table."""
+    print("Adding reliability scoring columns to annotator_agreement table...")
+
+    # Add new columns
+    conn.execute("ALTER TABLE annotator_agreement ADD COLUMN reliability_score REAL")
+    conn.execute("ALTER TABLE annotator_agreement ADD COLUMN calibration_status TEXT DEFAULT 'provisional'")
+    conn.execute("ALTER TABLE annotator_agreement ADD COLUMN scored_annotation_count INTEGER DEFAULT 0")
+
+    # Add index for reliability score
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_annotator_reliability ON annotator_agreement(reliability_score)")
+
+    # Initialize scored_annotation_count from existing data
+    conn.execute("""
+        UPDATE annotator_agreement SET scored_annotation_count = total_annotations
+        WHERE total_annotations > 0
+    """)
+
+    # Calculate initial reliability scores for all existing annotators
+    annotators = conn.execute("SELECT user_id FROM annotator_agreement").fetchall()
+    for row in annotators:
+        calculate_reliability_score(conn, row["user_id"])
+
+    print(f"Migration complete. Added reliability columns and calculated scores for {len(annotators)} annotators.")
 
 
 @contextmanager
@@ -1122,6 +1178,83 @@ def update_annotator_agreement(conn, user_id: int):
 
 
 # ============================================================================
+# Reliability Scoring Helpers
+# ============================================================================
+
+def calculate_reliability_score(conn, user_id: int) -> dict:
+    """
+    Calculate reliability score for an annotator based on agreement with consensus.
+    
+    Reliability score is a 0-100 integer derived from agreement_with_consensus.
+    Calibration status is 'provisional' until CALIBRATION_MIN_SCORED annotations,
+    then becomes 'calibrated'.
+    
+    Returns dict with:
+    - reliability_score: 0-100 integer
+    - calibration_status: 'provisional' or 'calibrated'
+    - scored_annotation_count: number of annotations used for scoring
+    """
+    # Get annotator agreement metrics
+    agreement = conn.execute("""
+        SELECT total_annotations, agreement_with_consensus
+        FROM annotator_agreement
+        WHERE user_id = ?
+    """, (user_id,)).fetchone()
+    
+    if not agreement:
+        # No agreement data yet - calculate it
+        metrics = calculate_annotator_agreement(conn, user_id)
+        total_annotations = metrics['total_annotations']
+        agreement_with_consensus = metrics['agreement_with_consensus']
+    else:
+        total_annotations = agreement['total_annotations']
+        agreement_with_consensus = agreement['agreement_with_consensus']
+    
+    # Determine calibration status
+    calibration_status = 'calibrated' if total_annotations >= CALIBRATION_MIN_SCORED else 'provisional'
+    
+    # Calculate reliability score (0-100)
+    if agreement_with_consensus is not None:
+        # Scale 0-1 agreement to 0-100 reliability score
+        reliability_score = round(agreement_with_consensus * 100)
+    else:
+        # No agreement data = no score
+        reliability_score = None
+    
+    # Update annotator_agreement table
+    conn.execute("""
+        UPDATE annotator_agreement
+        SET reliability_score = ?,
+            calibration_status = ?,
+            scored_annotation_count = ?
+        WHERE user_id = ?
+    """, (reliability_score, calibration_status, total_annotations, user_id))
+    
+    return {
+        'reliability_score': reliability_score,
+        'calibration_status': calibration_status,
+        'scored_annotation_count': total_annotations
+    }
+
+
+def update_reliability_after_annotation(conn, user_id: int):
+    """
+    Update reliability metrics after a new annotation is submitted.
+    
+    This:
+    1. Increments scored_annotation_count
+    2. Recalculates agreement_with_consensus
+    3. Updates reliability_score
+    4. May promote from 'provisional' to 'calibrated'
+    """
+    # Recalculate agreement (includes the new annotation)
+    update_annotator_agreement(conn, user_id)
+    
+    # Recalculate reliability
+    calculate_reliability_score(conn, user_id)
+
+
+# ============================================================================
 # Locking Helpers
 # ============================================================================
 
@@ -1450,6 +1583,18 @@ class AnnotatorAgreementResponse(BaseModel):
     last_calculated: Optional[str] = Field(None, description="When metrics were last calculated")
 
 
+class ReliabilityResponse(BaseModel):
+    """Response containing reliability metrics for an annotator."""
+    user_id: int = Field(..., description="User ID")
+    username: str = Field(..., description="Username")
+    display_name: Optional[str] = Field(None, description="Display name")
+    reliability_score: Optional[int] = Field(None, description="Reliability score (0-100)")
+    calibration_status: str = Field(..., description="Calibration status: 'provisional' or 'calibrated'")
+    scored_annotation_count: int = Field(..., description="Number of annotations used for scoring")
+    calibration_threshold: int = Field(..., description="Annotations needed for 'calibrated' status")
+    is_calibrated: bool = Field(..., description="Whether annotator is calibrated")
+
+
 class PoolStatsResponse(BaseModel):
     """Response containing question pool statistics."""
     test: int = Field(..., description="High-consensus calibration examples")
@@ -1760,6 +1905,12 @@ async def admin_get_user(user_id: int, admin: dict = Depends(require_admin)):
             FROM annotator_agreement WHERE user_id = ?
         """, (user_id,)).fetchone()
         
+        # Get reliability metrics
+        reliability = conn.execute("""
+            SELECT reliability_score, calibration_status, scored_annotation_count
+            FROM annotator_agreement WHERE user_id = ?
+        """, (user_id,)).fetchone()
+        
         return {
             "id": user["id"],
             "username": user["username"],
@@ -1777,7 +1928,12 @@ async def admin_get_user(user_id: int, admin: dict = Depends(require_admin)):
                 "agreement_with_consensus": agreement["agreement_with_consensus"] if agreement else None,
                 "complexity_agreement": agreement["complexity_agreement"] if agreement else None,
                 "span_agreement": agreement["span_agreement"] if agreement else None,
-            } if agreement else None
+            } if agreement else None,
+            "reliability": {
+                "reliability_score": reliability["reliability_score"] if reliability else None,
+                "calibration_status": reliability["calibration_status"] if reliability else "provisional",
+                "scored_annotation_count": reliability["scored_annotation_count"] if reliability else 0,
+            } if reliability else None
         }
 
 
@@ -2136,9 +2292,10 @@ async def recalculate_all_agreement(admin: dict = Depends(require_admin)):
             SELECT DISTINCT annotator_id FROM complexity_scores
         """).fetchall()
         
-        # Recalculate annotator agreement
+        # Recalculate annotator agreement and reliability
         for row in users:
             update_annotator_agreement(conn, row["annotator_id"])
+            calculate_reliability_score(conn, row["annotator_id"])
         
         return {
             "status": "completed",
@@ -2174,6 +2331,149 @@ async def get_pool_stats(user: dict = Depends(get_current_user)):
             consensus_threshold=CONSENSUS_THRESHOLD,
             agreement_threshold=AGREEMENT_HIGH_THRESHOLD
         )
+
+
+# ============================================================================
+# API Endpoints - Reliability
+# ============================================================================
+
+@app.get(
+    "/api/reliability/me",
+    tags=["Reliability"],
+    summary="Get my reliability score",
+    description="Get reliability and calibration status for the current user.",
+    response_model=ReliabilityResponse,
+)
+async def get_my_reliability(user: dict = Depends(get_current_user)):
+    """Get reliability metrics for the current user."""
+    user_id = user["id"]
+    
+    with get_db() as conn:
+        # Get reliability metrics
+        reliability = conn.execute("""
+            SELECT reliability_score, calibration_status, scored_annotation_count
+            FROM annotator_agreement
+            WHERE user_id = ?
+        """, (user_id,)).fetchone()
+        
+        if not reliability:
+            # No data yet - return defaults
+            return ReliabilityResponse(
+                user_id=user_id,
+                username=user["username"],
+                display_name=user.get("display_name"),
+                reliability_score=None,
+                calibration_status="provisional",
+                scored_annotation_count=0,
+                calibration_threshold=CALIBRATION_MIN_SCORED,
+                is_calibrated=False
+            )
+        
+        return ReliabilityResponse(
+            user_id=user_id,
+            username=user["username"],
+            display_name=user.get("display_name"),
+            reliability_score=reliability["reliability_score"],
+            calibration_status=reliability["calibration_status"],
+            scored_annotation_count=reliability["scored_annotation_count"],
+            calibration_threshold=CALIBRATION_MIN_SCORED,
+            is_calibrated=reliability["calibration_status"] == "calibrated"
+        )
+
+
+@app.get(
+    "/api/reliability/user/{user_id}",
+    tags=["Reliability"],
+    summary="Get user reliability score",
+    description="Get reliability and calibration status for a specific user.",
+    response_model=ReliabilityResponse,
+)
+async def get_user_reliability(
+    user_id: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get reliability metrics for a specific user."""
+    with get_db() as conn:
+        # Get user info
+        user = conn.execute(
+            "SELECT username, display_name FROM users WHERE id = ?",
+            (user_id,)
+        ).fetchone()
+        
+        if not user:
+            raise HTTPException(404, f"User not found: {user_id}")
+        
+        # Get reliability metrics
+        reliability = conn.execute("""
+            SELECT reliability_score, calibration_status, scored_annotation_count
+            FROM annotator_agreement
+            WHERE user_id = ?
+        """, (user_id,)).fetchone()
+        
+        if not reliability:
+            # No data yet - return defaults
+            return ReliabilityResponse(
+                user_id=user_id,
+                username=user["username"],
+                display_name=user["display_name"],
+                reliability_score=None,
+                calibration_status="provisional",
+                scored_annotation_count=0,
+                calibration_threshold=CALIBRATION_MIN_SCORED,
+                is_calibrated=False
+            )
+        
+        return ReliabilityResponse(
+            user_id=user_id,
+            username=user["username"],
+            display_name=user["display_name"],
+            reliability_score=reliability["reliability_score"],
+            calibration_status=reliability["calibration_status"],
+            scored_annotation_count=reliability["scored_annotation_count"],
+            calibration_threshold=CALIBRATION_MIN_SCORED,
+            is_calibrated=reliability["calibration_status"] == "calibrated"
+        )
+
+
+@app.get(
+    "/api/reliability/leaderboard",
+    tags=["Reliability"],
+    summary="Get reliability leaderboard",
+    description="Get leaderboard of annotators sorted by reliability score. Only includes users with at least one scored annotation.",
+)
+async def get_reliability_leaderboard(
+    user: dict = Depends(get_current_user),
+    limit: int = Query(50, ge=1, le=500, description="Maximum number of users to return")
+):
+    """Get reliability leaderboard."""
+    with get_db() as conn:
+        leaderboard = conn.execute("""
+            SELECT u.id, u.username, u.display_name,
+                   aa.reliability_score, aa.calibration_status, aa.scored_annotation_count
+            FROM annotator_agreement aa
+            JOIN users u ON aa.user_id = u.id
+            WHERE aa.scored_annotation_count > 0
+            ORDER BY aa.reliability_score DESC NULLS LAST, aa.scored_annotation_count DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        
+        return {
+            "leaderboard": [
+                {
+                    "rank": i + 1,
+                    "user_id": row["id"],
+                    "username": row["username"],
+                    "display_name": row["display_name"],
+                    "reliability_score": row["reliability_score"],
+                    "calibration_status": row["calibration_status"],
+                    "scored_annotation_count": row["scored_annotation_count"],
+                    "is_calibrated": row["calibration_status"] == "calibrated"
+                }
+                for i, row in enumerate(leaderboard)
+            ],
+            "total": len(leaderboard),
+            "calibration_threshold": CALIBRATION_MIN_SCORED
+        }
 
 
 # ============================================================================
@@ -2357,7 +2657,7 @@ async def get_example(
     "/api/label",
     tags=["Annotation"],
     summary="Submit annotation",
-    description="Submit span labels and complexity scores for an example. Automatically releases any lock. Updates agreement metrics.",
+    description="Submit span labels and complexity scores for an example. Automatically releases any lock. Updates agreement and reliability metrics.",
 )
 async def submit_annotation(
     submission: AnnotationSubmission,
@@ -2428,6 +2728,9 @@ async def submit_annotation(
         
         # Update agreement metrics for this example
         agreement_metrics = update_example_agreement(conn, submission.example_id)
+        
+        # Update reliability metrics for this user
+        update_reliability_after_annotation(conn, user_id)
 
         response = {
             "status": "saved", 
@@ -2480,7 +2783,7 @@ async def skip_example(
     "/api/stats",
     tags=["Statistics"],
     summary="Get statistics",
-    description="Get annotation statistics including per-dataset counts, label distribution, complexity score averages, per-annotator stats, custom label usage, active locks, and agreement metrics.",
+    description="Get annotation statistics including per-dataset counts, label distribution, complexity score averages, per-annotator stats, custom label usage, active locks, agreement metrics, and reliability scores.",
 )
 async def get_stats(user: dict = Depends(get_optional_user)):
     """Get labeling statistics."""
@@ -2553,11 +2856,14 @@ async def get_stats(user: dict = Depends(get_optional_user)):
             FROM complexity_scores
         """).fetchone()
 
-        # Annotator stats
+        # Annotator stats with reliability
         annotator_stats = conn.execute("""
-            SELECT u.username, u.display_name, u.role, COUNT(DISTINCT c.example_id) as labeled
+            SELECT u.username, u.display_name, u.role, 
+                   COUNT(DISTINCT c.example_id) as labeled,
+                   aa.reliability_score, aa.calibration_status
             FROM users u
             LEFT JOIN complexity_scores c ON u.id = c.annotator_id
+            LEFT JOIN annotator_agreement aa ON u.id = aa.user_id
             GROUP BY u.id
             HAVING labeled > 0
             ORDER BY labeled DESC
@@ -2604,13 +2910,22 @@ async def get_stats(user: dict = Depends(get_optional_user)):
             user_agreement = conn.execute("""
                 SELECT agreement_with_consensus FROM annotator_agreement WHERE user_id = ?
             """, (user_id,)).fetchone()
+            user_reliability = conn.execute("""
+                SELECT reliability_score, calibration_status, scored_annotation_count
+                FROM annotator_agreement WHERE user_id = ?
+            """, (user_id,)).fetchone()
             
             user_stats = {
                 "labeled": user_labeled["count"],
                 "skipped": user_skipped["count"],
                 "custom_labels_used": user_custom["count"],
                 "active_locks": user_locks["count"],
-                "agreement_with_consensus": user_agreement["agreement_with_consensus"] if user_agreement else None
+                "agreement_with_consensus": user_agreement["agreement_with_consensus"] if user_agreement else None,
+                "reliability": {
+                    "reliability_score": user_reliability["reliability_score"] if user_reliability else None,
+                    "calibration_status": user_reliability["calibration_status"] if user_reliability else "provisional",
+                    "scored_annotation_count": user_reliability["scored_annotation_count"] if user_reliability else 0,
+                } if user_reliability else None
             }
 
         return {
@@ -2631,31 +2946,14 @@ async def get_stats(user: dict = Depends(get_optional_user)):
                 "total_spans": span_stats["total_spans"],
                 "examples_with_spans": span_stats["examples_with_spans"]
             },
-            "label_distribution": {
-                row["label_name"]: {
-                    "count": row["count"],
-                    "is_custom": bool(row["is_custom"])
-                }
+            "labels": [
+                {"name": row["label_name"], "is_custom": bool(row["is_custom"]), "count": row["count"]}
                 for row in label_dist
-            },
-            "custom_label_stats": {
+            ],
+            "custom_labels": {
                 "custom_count": custom_stats["custom_count"] or 0,
                 "system_count": custom_stats["system_count"] or 0,
-                "unique_custom_labels": custom_stats["unique_custom_labels"] or 0,
-            },
-            "lock_stats": {
-                "active_locks": lock_stats["active_locks"],
-                "users_with_locks": lock_stats["users_with_locks"],
-                "lock_timeout_minutes": LOCK_TIMEOUT_MINUTES,
-            },
-            "pool_stats": {
-                row["pool_status"]: row["count"]
-                for row in pool_stats
-            },
-            "agreement_stats": {
-                "average_agreement": agreement_stats["avg_agreement"],
-                "examples_with_agreement": agreement_stats["examples_with_agreement"],
-                "consensus_threshold": CONSENSUS_THRESHOLD,
+                "unique_custom_labels": custom_stats["unique_custom_labels"] or 0
             },
             "complexity_averages": {
                 "reasoning": score_avgs["reasoning"],
@@ -2664,139 +2962,74 @@ async def get_stats(user: dict = Depends(get_optional_user)):
                 "contextual": score_avgs["contextual"],
                 "constraints": score_avgs["constraints"],
                 "ambiguity": score_avgs["ambiguity"],
-            } if score_avgs["total"] > 0 else None,
-            "total_labeled": score_avgs["total"],
+                "total_scored": score_avgs["total"]
+            },
             "annotators": [
                 {
                     "username": row["username"],
                     "display_name": row["display_name"],
                     "role": row["role"],
-                    "labeled": row["labeled"]
+                    "labeled": row["labeled"],
+                    "reliability_score": row["reliability_score"],
+                    "calibration_status": row["calibration_status"] or "provisional"
                 }
                 for row in annotator_stats
             ],
-            "user_stats": user_stats,
-            "tokenizer": TOKENIZER_MODEL,
+            "locks": {
+                "active_locks": lock_stats["active_locks"],
+                "users_with_locks": lock_stats["users_with_locks"]
+            },
+            "pools": {
+                row["pool_status"]: row["count"]
+                for row in pool_stats
+            },
+            "agreement": {
+                "avg_agreement_score": agreement_stats["avg_agreement"],
+                "examples_with_agreement": agreement_stats["examples_with_agreement"]
+            },
+            "user": user_stats
         }
 
 
 @app.get(
     "/api/export",
     tags=["Statistics"],
-    summary="Export annotations",
-    description="Export all annotations as JSONL format. Includes annotator information, complexity scores, span labels with is_custom flag, and agreement metrics.",
+    summary="Export all data (admin)",
+    description="Export all annotation data as JSON. Includes examples, labels, scores, and metadata. Admin only.",
 )
-async def export_labels():
-    """Export all labels as JSONL with annotator information."""
+async def export_data(admin: dict = Depends(require_admin)):
+    """Export all annotation data."""
     with get_db() as conn:
-        examples = conn.execute("""
-            SELECT DISTINCT e.*, u.username as annotator, u.display_name as annotator_name,
-                   c.reasoning, c.creativity, c.domain_knowledge,
-                   c.contextual, c.constraints, c.ambiguity, c.annotator_id
-            FROM examples e
-            JOIN complexity_scores c ON e.id = c.example_id
-            JOIN users u ON c.annotator_id = u.id
-        """).fetchall()
-
-        results = []
+        # Get all examples
+        examples = conn.execute("SELECT * FROM examples").fetchall()
+        
+        # Get all labels with spans
+        all_data = []
         for ex in examples:
-            # Get labels for this example by this annotator
             labels = conn.execute("""
-                SELECT l.label_name, l.label_color, l.is_custom,
+                SELECT l.annotator_id, u.username, l.label_name, l.label_color, l.is_custom,
                        s.source, s.word_index, s.word_text, s.char_start, s.char_end
                 FROM labels l
-                JOIN span_selections s ON s.label_id = l.id
-                WHERE l.example_id = ? AND l.annotator_id = ?
-            """, (ex["id"], ex["annotator_id"])).fetchall()
-
-            # Group spans by label
-            label_spans = {}
-            for row in labels:
-                name = row["label_name"]
-                if name not in label_spans:
-                    label_spans[name] = {
-                        "label_name": name,
-                        "label_color": row["label_color"],
-                        "is_custom": bool(row["is_custom"]),
-                        "spans": []
-                    }
-                label_spans[name]["spans"].append({
-                    "source": row["source"],
-                    "word_index": row["word_index"],
-                    "word_text": row["word_text"],
-                    "char_start": row["char_start"],
-                    "char_end": row["char_end"]
-                })
-
-            # Get agreement for this example
-            agreement = conn.execute("""
-                SELECT agreement_score, complexity_agreement, span_agreement
-                FROM example_agreement WHERE example_id = ?
-            """, (ex["id"],)).fetchone()
-
-            results.append({
-                "id": ex["id"],
-                "dataset": ex["dataset"],
-                "premise": ex["premise"],
-                "hypothesis": ex["hypothesis"],
-                "gold_label": ex["gold_label"],
-                "gold_label_text": ex["gold_label_text"],
-                "pool_status": ex["pool_status"],
-                "annotator": ex["annotator"],
-                "annotator_name": ex["annotator_name"],
-                "tokenizer": TOKENIZER_MODEL,
-                "complexity_scores": {
-                    "reasoning": ex["reasoning"],
-                    "creativity": ex["creativity"],
-                    "domain_knowledge": ex["domain_knowledge"],
-                    "contextual": ex["contextual"],
-                    "constraints": ex["constraints"],
-                    "ambiguity": ex["ambiguity"],
-                },
-                "span_labels": list(label_spans.values()),
-                "agreement": {
-                    "agreement_score": agreement["agreement_score"] if agreement else None,
-                    "complexity_agreement": agreement["complexity_agreement"] if agreement else None,
-                    "span_agreement": agreement["span_agreement"] if agreement else None,
-                } if agreement else None
+                JOIN users u ON l.annotator_id = u.id
+                LEFT JOIN span_selections s ON s.label_id = l.id
+                WHERE l.example_id = ?
+            """, (ex["id"],)).fetchall()
+            
+            scores = conn.execute("""
+                SELECT c.annotator_id, u.username, c.reasoning, c.creativity, 
+                       c.domain_knowledge, c.contextual, c.constraints, c.ambiguity
+                FROM complexity_scores c
+                JOIN users u ON c.annotator_id = u.id
+                WHERE c.example_id = ?
+            """, (ex["id"],)).fetchall()
+            
+            all_data.append({
+                "example": dict(ex),
+                "labels": [dict(l) for l in labels],
+                "scores": [dict(s) for s in scores]
             })
-
-        return {"count": len(results), "data": results, "tokenizer": TOKENIZER_MODEL}
-
-
-@app.get(
-    "/api/users",
-    tags=["Statistics"],
-    summary="List annotators",
-    description="List all registered annotators with their annotation counts. Excludes system users (anonymous, legacy).",
-)
-async def list_users(user: dict = Depends(get_current_user)):
-    """List all annotators (for admin purposes)."""
-    with get_db() as conn:
-        users = conn.execute("""
-            SELECT u.id, u.username, u.display_name, u.role, u.created_at, u.last_seen,
-                   COUNT(DISTINCT c.example_id) as annotations
-            FROM users u
-            LEFT JOIN complexity_scores c ON u.id = c.annotator_id
-            WHERE u.id > 2  -- Exclude system users (anonymous, legacy)
-            GROUP BY u.id
-            ORDER BY annotations DESC
-        """).fetchall()
         
-        return {
-            "users": [
-                {
-                    "id": row["id"],
-                    "username": row["username"],
-                    "display_name": row["display_name"],
-                    "role": row["role"],
-                    "created_at": row["created_at"],
-                    "last_seen": row["last_seen"],
-                    "annotations": row["annotations"]
-                }
-                for row in users
-            ]
-        }
+        return {"data": all_data, "total_examples": len(examples)}
 
 
 if __name__ == "__main__":
