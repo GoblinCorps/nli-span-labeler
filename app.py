@@ -2116,6 +2116,30 @@ class LeaderboardResponse(BaseModel):
     calibration_threshold: int = Field(..., description="Annotations needed for calibration")
 
 
+class ImportExample(BaseModel):
+    """Single example for bulk import."""
+    premise: str = Field(..., description="Premise text")
+    hypothesis: str = Field(..., description="Hypothesis text")
+    label: Optional[str] = Field(None, description="Gold label (entailment/neutral/contradiction)")
+    id: Optional[str] = Field(None, description="Optional example ID (auto-generated if not provided)")
+    source: Optional[str] = Field(None, description="Optional source/dataset metadata")
+
+
+class ImportRequest(BaseModel):
+    """Request body for bulk import."""
+    examples: list[ImportExample] = Field(..., description="List of examples to import")
+    dataset: str = Field("imported", description="Dataset name for imported examples")
+    skip_duplicates: bool = Field(True, description="Skip examples with duplicate IDs (vs error)")
+
+
+class ImportResponse(BaseModel):
+    """Response from bulk import."""
+    imported: int = Field(..., description="Number of examples successfully imported")
+    skipped: int = Field(0, description="Number of duplicates skipped")
+    errors: int = Field(0, description="Number of examples that failed to import")
+    dataset: str = Field(..., description="Dataset name used")
+
+
 # ============================================================================
 # Data Loading
 # ============================================================================
@@ -3901,6 +3925,179 @@ async def list_datasets():
         name = f.stem.split("_")[0]
         datasets.add(name)
     return {"datasets": sorted(datasets)}
+
+
+# Label text to integer mapping
+LABEL_MAP = {
+    "entailment": 0,
+    "neutral": 1,
+    "contradiction": 2,
+    "e": 0,
+    "n": 1,
+    "c": 2,
+    "0": 0,
+    "1": 1,
+    "2": 2,
+}
+
+
+@app.post(
+    "/api/import",
+    tags=["Admin"],
+    summary="Bulk import examples",
+    description="Import multiple NLI examples at once. Requires admin role. Accepts JSON array of examples.",
+    response_model=ImportResponse,
+)
+async def bulk_import_examples(
+    request: ImportRequest,
+    admin: dict = Depends(require_admin),
+):
+    """Bulk import NLI examples into the database."""
+    imported = 0
+    skipped = 0
+    errors = 0
+
+    with get_db() as conn:
+        for i, ex in enumerate(request.examples):
+            try:
+                # Generate ID if not provided
+                example_id = ex.id or f"{request.dataset}_{i}_{secrets.token_hex(4)}"
+
+                # Parse label
+                label_int = None
+                label_text = None
+                if ex.label:
+                    label_lower = ex.label.lower().strip()
+                    label_int = LABEL_MAP.get(label_lower)
+                    if label_int is not None:
+                        label_text = ["entailment", "neutral", "contradiction"][label_int]
+                    else:
+                        # Try to parse as integer directly
+                        try:
+                            label_int = int(ex.label)
+                            if 0 <= label_int <= 2:
+                                label_text = ["entailment", "neutral", "contradiction"][label_int]
+                            else:
+                                label_int = None
+                        except ValueError:
+                            pass
+
+                # Insert into database
+                cursor = conn.execute("""
+                    INSERT OR IGNORE INTO examples
+                    (id, dataset, premise, hypothesis, gold_label, gold_label_text, source_file, pool_status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'zero_entry')
+                """, (
+                    example_id,
+                    request.dataset,
+                    ex.premise,
+                    ex.hypothesis,
+                    label_int,
+                    label_text,
+                    ex.source or "api_import"
+                ))
+
+                if cursor.rowcount > 0:
+                    imported += 1
+                else:
+                    skipped += 1
+
+            except Exception as e:
+                errors += 1
+                print(f"Error importing example {i}: {e}")
+
+    return ImportResponse(
+        imported=imported,
+        skipped=skipped,
+        errors=errors,
+        dataset=request.dataset
+    )
+
+
+@app.post(
+    "/api/import/jsonl",
+    tags=["Admin"],
+    summary="Import from JSONL content",
+    description="Import examples from JSONL format (one JSON object per line). Requires admin role.",
+    response_model=ImportResponse,
+)
+async def import_jsonl(
+    content: str = Body(..., media_type="text/plain", description="JSONL content (one JSON object per line)"),
+    dataset: str = Query("imported", description="Dataset name for imported examples"),
+    skip_duplicates: bool = Query(True, description="Skip duplicates instead of erroring"),
+    admin: dict = Depends(require_admin),
+):
+    """Import examples from JSONL format."""
+    imported = 0
+    skipped = 0
+    errors = 0
+
+    with get_db() as conn:
+        for i, line in enumerate(content.strip().split("\n")):
+            if not line.strip():
+                continue
+            try:
+                ex = json.loads(line)
+
+                # Generate ID if not provided
+                example_id = ex.get("id") or f"{dataset}_{i}_{secrets.token_hex(4)}"
+
+                # Parse label
+                label_raw = ex.get("label") or ex.get("gold_label")
+                label_int = None
+                label_text = None
+                if label_raw is not None:
+                    if isinstance(label_raw, int):
+                        label_int = label_raw
+                        if 0 <= label_int <= 2:
+                            label_text = ["entailment", "neutral", "contradiction"][label_int]
+                    else:
+                        label_lower = str(label_raw).lower().strip()
+                        label_int = LABEL_MAP.get(label_lower)
+                        if label_int is not None:
+                            label_text = ["entailment", "neutral", "contradiction"][label_int]
+
+                # Get premise/hypothesis (handle various field names)
+                premise = ex.get("premise") or ex.get("sentence1") or ""
+                hypothesis = ex.get("hypothesis") or ex.get("sentence2") or ""
+
+                if not premise or not hypothesis:
+                    errors += 1
+                    continue
+
+                # Insert into database
+                cursor = conn.execute("""
+                    INSERT OR IGNORE INTO examples
+                    (id, dataset, premise, hypothesis, gold_label, gold_label_text, source_file, pool_status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'zero_entry')
+                """, (
+                    example_id,
+                    dataset,
+                    premise,
+                    hypothesis,
+                    label_int,
+                    label_text,
+                    ex.get("source") or "jsonl_import"
+                ))
+
+                if cursor.rowcount > 0:
+                    imported += 1
+                else:
+                    skipped += 1
+
+            except json.JSONDecodeError as e:
+                errors += 1
+                print(f"JSON parse error on line {i}: {e}")
+            except Exception as e:
+                errors += 1
+                print(f"Error importing line {i}: {e}")
+
+    return ImportResponse(
+        imported=imported,
+        skipped=skipped,
+        errors=errors,
+        dataset=dataset
+    )
 
 
 # ============================================================================
