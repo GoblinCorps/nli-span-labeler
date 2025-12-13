@@ -369,6 +369,96 @@
             color: var(--text-secondary);
         }
 
+        /* Edge Case Flags Section */
+        .edge-case-section {
+            margin-top: 15px;
+            padding: 15px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
+            border-left: 3px solid var(--warning);
+        }
+
+        .edge-case-section h4 {
+            margin: 0 0 12px 0;
+            font-size: 0.95rem;
+            color: var(--warning);
+        }
+
+        .edge-case-flags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .edge-case-flag {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+            padding: 6px 10px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 6px;
+            border: 1px solid transparent;
+            transition: all 0.2s;
+        }
+
+        .edge-case-flag:hover {
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .edge-case-flag.checked {
+            border-color: var(--warning);
+            background: rgba(251, 191, 36, 0.15);
+        }
+
+        .edge-case-flag input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            accent-color: var(--warning);
+        }
+
+        .edge-case-flag label {
+            cursor: pointer;
+            font-size: 0.85rem;
+            user-select: none;
+        }
+
+        .rationale-section {
+            margin-top: 12px;
+        }
+
+        .rationale-toggle {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            margin-bottom: 8px;
+        }
+
+        .rationale-toggle:hover {
+            color: var(--text-primary);
+        }
+
+        .rationale-textarea {
+            width: 100%;
+            min-height: 60px;
+            padding: 10px;
+            background: #1a1a2e;
+            border: 1px solid #444;
+            border-radius: 6px;
+            color: var(--text-primary);
+            font-size: 0.9rem;
+            resize: vertical;
+        }
+
+        .rationale-textarea:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
         .labels-section { margin-top: 20px; }
 
         .labels-header {
@@ -458,11 +548,33 @@
             display: flex;
             flex-direction: column;
             gap: 5px;
+            padding: 4px 8px;
+            border-radius: 6px;
+            border: 2px solid transparent;
+            transition: border-color 0.2s, background 0.2s;
+        }
+
+        .complexity-item.focused {
+            border-color: var(--accent);
+            background: rgba(74, 158, 255, 0.1);
         }
 
         .complexity-label {
             font-size: 0.85rem;
             color: var(--text-secondary);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .slider-key-hint {
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+            opacity: 0.6;
+            background: rgba(255, 255, 255, 0.1);
+            padding: 2px 5px;
+            border-radius: 3px;
+            font-family: monospace;
         }
 
         .complexity-input {
@@ -1592,6 +1704,7 @@
             
             <div class="modal-tabs" id="help-tabs">
                 <button class="modal-tab active" onclick="switchHelpTab('overview')">Overview</button>
+                <button class="modal-tab" onclick="switchHelpTab('rubric')">Rubric</button>
                 <button class="modal-tab" onclick="switchHelpTab('labels')">Labels</button>
                 <button class="modal-tab" onclick="switchHelpTab('shortcuts')">Shortcuts</button>
                 <button class="modal-tab" onclick="switchHelpTab('api')">API</button>
@@ -1641,6 +1754,80 @@
                         Sometimes words are split into subword tokens, shown connected with a small dash.
                         For example, "running" might become "run" + "##ning".
                     </p>
+                </div>
+            </div>
+
+            <!-- Rubric Tab -->
+            <div id="help-rubric" class="help-tab-content">
+                <div class="help-content">
+                    <h3>The Core Principle</h3>
+                    <div class="tip" style="font-size: 1.1em; padding: 15px;">
+                        <strong>Mark the smallest set of tokens that, if removed, would change the NLI label.</strong>
+                    </div>
+                    <p>Mental test: "If I deleted this word, would the relationship still hold?"</p>
+
+                    <h3>Entailment Spans</h3>
+                    <p><strong>Definition:</strong> Tokens that establish the logical bridge between premise and hypothesis.</p>
+
+                    <p><strong>What to Mark:</strong></p>
+                    <ul>
+                        <li><strong>Aligned entities/concepts</strong> — Tokens in BOTH sentences referring to the same thing
+                            <br><code>P: A [man] plays [guitar]</code> → <code>H: A [person] plays [music]</code>
+                            <br>Mark: man↔person, guitar↔music</li>
+                        <li><strong>Entailing predicates</strong> — Verbs in premise that logically imply hypothesis
+                            <br><code>P: The cat is [sleeping]</code> → <code>H: The cat is [resting]</code></li>
+                        <li><strong>Scope markers</strong> — Words showing premise is more specific
+                            <br><code>P: [Three] dogs</code> → <code>H: [Some] dogs</code></li>
+                    </ul>
+                    <p><strong>Do NOT Mark:</strong> Determiners (a, the) unless they change meaning; punctuation; background details irrelevant to the inference.</p>
+
+                    <h3>Contradiction Spans</h3>
+                    <p><strong>Definition:</strong> Tokens that cannot both be true simultaneously.</p>
+
+                    <p><strong>What to Mark:</strong></p>
+                    <ul>
+                        <li><strong>Direct negation</strong> — <code>P: [open]</code> ↔ <code>H: [closed]</code></li>
+                        <li><strong>Incompatible quantities</strong> — <code>P: [All] students</code> ↔ <code>H: [No] students</code></li>
+                        <li><strong>Mutually exclusive predicates</strong> — <code>P: [standing]</code> ↔ <code>H: [sitting]</code></li>
+                        <li><strong>Entity mismatch</strong> — <code>P: [John] won</code> ↔ <code>H: [Mary] won</code> (if same event)</li>
+                    </ul>
+                    <p><strong>Do NOT Mark:</strong> Tokens that differ but aren't contradictory; background tokens consistent between both.</p>
+
+                    <h3>Neutral Spans</h3>
+                    <p><strong>Definition:</strong> Tokens introducing information not addressed by the other sentence. This is the trickiest category—neutral means "could be true or false given the premise."</p>
+
+                    <p><strong>What to Mark:</strong></p>
+                    <ul>
+                        <li><strong>Ungrounded details in hypothesis</strong>
+                            <br><code>P: A woman is walking</code> → <code>H: A woman is walking to [the store]</code>
+                            <br>Mark (H): "the store" — premise doesn't say where</li>
+                        <li><strong>Unmentioned entities</strong>
+                            <br><code>P: Two men are talking</code> → <code>H: Two [friends] are talking</code>
+                            <br>Mark: "friends" — relationship not established</li>
+                        <li><strong>Specificity gap</strong>
+                            <br><code>P: A person is eating</code> → <code>H: A person is eating [breakfast]</code>
+                            <br>Mark: "breakfast" — meal type not specified</li>
+                    </ul>
+                    <p><strong>Decision test:</strong> "Does the premise give evidence for or against this token?" If neither → neutral span.</p>
+
+                    <h3>Decision Tree</h3>
+                    <div style="background: var(--surface); padding: 15px; border-radius: 8px; font-family: monospace; font-size: 0.9em; line-height: 1.6;">
+                        "Should I mark this token?"<br>
+                        &nbsp;&nbsp;└► Would removing it change the NLI label?<br>
+                        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;YES → Mark it<br>
+                        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;NO → Don't mark<br><br>
+                        "Is this entailment, contradiction, or neutral?"<br>
+                        &nbsp;&nbsp;└► Can I be 100% certain of hypothesis from premise alone?<br>
+                        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;YES + matches → ENTAILMENT<br>
+                        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;YES + conflicts → CONTRADICTION<br>
+                        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;NO → NEUTRAL<br><br>
+                        "Multiple valid span sets?"<br>
+                        &nbsp;&nbsp;└► Flag it, pick one consistently, note in rationale
+                    </div>
+
+                    <div class="tip" style="margin-top: 15px;">
+                        <strong>Key Insight:</strong> Focus on the <em>relationship</em> between sentences, not just what each says individually. The same token might be neutral in one pair but contradictory in another.
+                    </div>
                 </div>
             </div>
 
@@ -1760,6 +1947,21 @@
                             </div>
                         </div>
                         <div class="shortcuts-section">
+                            <h4>Difficulty Sliders</h4>
+                            <div class="shortcut-row">
+                                <span class="shortcut-keys"><span class="shortcut-key">Shift</span>+<span class="shortcut-key">1</span>-<span class="shortcut-key">6</span></span>
+                                <span class="shortcut-desc">Focus slider (R/C/D/X/N/A)</span>
+                            </div>
+                            <div class="shortcut-row">
+                                <span class="shortcut-keys"><span class="shortcut-key">+</span> <span class="shortcut-key">-</span></span>
+                                <span class="shortcut-desc">Adjust focused slider ±1</span>
+                            </div>
+                            <div class="shortcut-row">
+                                <span class="shortcut-keys"><span class="shortcut-key">0</span>-<span class="shortcut-key">9</span></span>
+                                <span class="shortcut-desc">Set slider value directly</span>
+                            </div>
+                        </div>
+                        <div class="shortcuts-section">
                             <h4>Actions</h4>
                             <div class="shortcut-row">
                                 <span class="shortcut-keys"><span class="shortcut-key">Enter</span></span>
@@ -1784,9 +1986,10 @@
                     </div>
 
                     <div class="tip" style="margin-top: 20px;">
-                        <strong>Power User Workflow:</strong> Press <code>1</code> to select "reasoning", 
-                        use <code>j/k</code> to navigate, <code>Space</code> to mark, then <code>Enter</code> to save.
-                        You can annotate without touching the mouse!
+                        <strong>Power User Workflow:</strong> Press <code>1</code> to select "reasoning",
+                        use <code>j/k</code> to navigate, <code>Space</code> to mark. Set difficulty with
+                        <code>Shift+1</code> then type <code>7</code>. Hit <code>Enter</code> to save.
+                        Full keyboard annotation, no mouse required!
                     </div>
                 </div>
             </div>
@@ -1986,6 +2189,34 @@
                     For dimensions rated &gt;5, click to select, then mark tokens that justify that rating.
                 </p>
                 <div id="difficulty-justification-list" class="difficulty-justification-grid"></div>
+            </div>
+
+            <!-- Edge Case Flags -->
+            <div class="edge-case-section">
+                <h4>⚠️ Edge Case Flags</h4>
+                <div class="edge-case-flags">
+                    <div class="edge-case-flag" onclick="toggleEdgeCaseFlag('ambiguous_gold')">
+                        <input type="checkbox" id="flag-ambiguous-gold" onclick="event.stopPropagation(); toggleEdgeCaseFlag('ambiguous_gold')">
+                        <label for="flag-ambiguous-gold">Ambiguous gold label</label>
+                    </div>
+                    <div class="edge-case-flag" onclick="toggleEdgeCaseFlag('multiple_valid')">
+                        <input type="checkbox" id="flag-multiple-valid" onclick="event.stopPropagation(); toggleEdgeCaseFlag('multiple_valid')">
+                        <label for="flag-multiple-valid">Multiple valid span sets</label>
+                    </div>
+                    <div class="edge-case-flag" onclick="toggleEdgeCaseFlag('needs_discussion')">
+                        <input type="checkbox" id="flag-needs-discussion" onclick="event.stopPropagation(); toggleEdgeCaseFlag('needs_discussion')">
+                        <label for="flag-needs-discussion">Needs discussion</label>
+                    </div>
+                </div>
+                <div class="rationale-section">
+                    <div class="rationale-toggle" onclick="toggleRationaleField()">
+                        <span id="rationale-arrow">▶</span>
+                        <span>Add rationale (optional)</span>
+                    </div>
+                    <textarea id="annotation-rationale" class="rationale-textarea hidden"
+                              placeholder="Explain your reasoning on this difficult example..."
+                              oninput="updateRationaleArrow()"></textarea>
+                </div>
             </div>
 
             <!-- Actions -->
@@ -2620,6 +2851,40 @@
                 return;
             }
 
+            // Shift+1-6: Focus difficulty sliders
+            if (e.shiftKey && e.key >= '1' && e.key <= '6') {
+                e.preventDefault();
+                focusSlider(parseInt(e.key) - 1);
+                return;
+            }
+
+            // +/- or =/_ : Adjust focused slider (= is unshifted +, - works both ways)
+            if (focusedSliderIndex >= 0) {
+                if (e.key === '+' || e.key === '=' || e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    adjustFocusedSlider(1);
+                    return;
+                }
+                if (e.key === '-' || e.key === '_' || e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    adjustFocusedSlider(-1);
+                    return;
+                }
+                // Direct number input for slider (0-9 sets value directly when slider focused)
+                if (!e.shiftKey && e.key >= '0' && e.key <= '9') {
+                    e.preventDefault();
+                    const dim = complexityDimensions[focusedSliderIndex];
+                    syncComplexity(dim.key, parseInt(e.key), 'keyboard');
+                    return;
+                }
+                // Escape clears slider focus
+                if (e.key === 'Escape') {
+                    e.preventDefault();
+                    clearSliderFocus();
+                    return;
+                }
+            }
+
             switch (e.key) {
                 // Navigation: j/k or arrows
                 case 'j':
@@ -2655,7 +2920,7 @@
                     toggleLabelOnFocusedWord();
                     break;
 
-                // Number keys 1-9: toggle specific label
+                // Number keys 1-9: toggle specific label (only when no slider focused)
                 case '1': case '2': case '3': case '4': case '5':
                 case '6': case '7': case '8': case '9':
                     e.preventDefault();
@@ -2871,11 +3136,16 @@
             renderLegend();
         }
 
+        let focusedSliderIndex = -1;  // Track which slider has keyboard focus
+
         function initComplexityInputs() {
             const grid = document.getElementById('complexity-grid');
-            grid.innerHTML = complexityDimensions.map(dim => `
-                <div class="complexity-item">
-                    <div class="complexity-label">${dim.label}</div>
+            grid.innerHTML = complexityDimensions.map((dim, idx) => `
+                <div class="complexity-item" id="complexity-item-${dim.key}">
+                    <div class="complexity-label">
+                        ${dim.label}
+                        <span class="slider-key-hint">Shift+${idx + 1}</span>
+                    </div>
                     <div class="complexity-input">
                         <input type="range" id="complexity-range-${dim.key}"
                                min="0" max="10" value="0"
@@ -2886,6 +3156,34 @@
                     </div>
                 </div>
             `).join('');
+        }
+
+        function focusSlider(index) {
+            if (index < 0 || index >= complexityDimensions.length) return;
+            focusedSliderIndex = index;
+            const dim = complexityDimensions[index];
+            const rangeInput = document.getElementById(`complexity-range-${dim.key}`);
+            if (rangeInput) {
+                rangeInput.focus();
+                // Highlight the slider item
+                document.querySelectorAll('.complexity-item').forEach(el => el.classList.remove('focused'));
+                document.getElementById(`complexity-item-${dim.key}`)?.classList.add('focused');
+            }
+        }
+
+        function adjustFocusedSlider(delta) {
+            if (focusedSliderIndex < 0 || focusedSliderIndex >= complexityDimensions.length) return;
+            const dim = complexityDimensions[focusedSliderIndex];
+            const numInput = document.getElementById(`complexity-num-${dim.key}`);
+            if (numInput) {
+                const newValue = Math.max(0, Math.min(10, parseInt(numInput.value) + delta));
+                syncComplexity(dim.key, newValue, 'keyboard');
+            }
+        }
+
+        function clearSliderFocus() {
+            focusedSliderIndex = -1;
+            document.querySelectorAll('.complexity-item').forEach(el => el.classList.remove('focused'));
         }
 
         function syncComplexity(key, value, source) {
@@ -3133,6 +3431,9 @@
             // Clear difficulty justifications
             difficultyJustifications.clear();
             renderDifficultyJustifications();
+
+            // Clear edge case flags
+            resetEdgeCaseFlags();
         }
 
         function renderExample() {
@@ -3495,6 +3796,74 @@
             });
         }
 
+        // ============================================================================
+        // Edge Case Flags
+        // ============================================================================
+
+        const edgeCaseFlags = new Set();  // Tracks which flags are checked
+
+        function toggleEdgeCaseFlag(flagKey) {
+            const checkbox = document.getElementById(`flag-${flagKey.replace(/_/g, '-')}`);
+            const container = checkbox?.closest('.edge-case-flag');
+
+            if (edgeCaseFlags.has(flagKey)) {
+                edgeCaseFlags.delete(flagKey);
+                if (checkbox) checkbox.checked = false;
+                if (container) container.classList.remove('checked');
+            } else {
+                edgeCaseFlags.add(flagKey);
+                if (checkbox) checkbox.checked = true;
+                if (container) container.classList.add('checked');
+            }
+        }
+
+        function toggleRationaleField() {
+            const textarea = document.getElementById('annotation-rationale');
+            const arrow = document.getElementById('rationale-arrow');
+            if (textarea.classList.contains('hidden')) {
+                textarea.classList.remove('hidden');
+                arrow.textContent = '▼';
+                textarea.focus();
+            } else {
+                textarea.classList.add('hidden');
+                arrow.textContent = '▶';
+            }
+        }
+
+        function updateRationaleArrow() {
+            const textarea = document.getElementById('annotation-rationale');
+            const arrow = document.getElementById('rationale-arrow');
+            // Keep arrow pointing down if there's content
+            if (textarea.value.trim()) {
+                arrow.textContent = '▼';
+            }
+        }
+
+        function getEdgeCaseData() {
+            return {
+                flags: Array.from(edgeCaseFlags),
+                rationale: document.getElementById('annotation-rationale')?.value.trim() || ''
+            };
+        }
+
+        function resetEdgeCaseFlags() {
+            edgeCaseFlags.clear();
+            // Reset checkboxes
+            document.querySelectorAll('.edge-case-flag').forEach(el => {
+                el.classList.remove('checked');
+                const checkbox = el.querySelector('input[type="checkbox"]');
+                if (checkbox) checkbox.checked = false;
+            });
+            // Reset rationale
+            const textarea = document.getElementById('annotation-rationale');
+            if (textarea) {
+                textarea.value = '';
+                textarea.classList.add('hidden');
+            }
+            const arrow = document.getElementById('rationale-arrow');
+            if (arrow) arrow.textContent = '▶';
+        }
+
         function clearSelections() {
             labels.forEach(label => {
                 label.spans = { premise: new Set(), hypothesis: new Set() };
@@ -3503,6 +3872,8 @@
             // Also clear difficulty justifications
             difficultyJustifications.clear();
             renderDifficultyJustifications();
+            // Also clear edge case flags
+            resetEdgeCaseFlags();
             renderLabels();
             updateWordHighlights();
             showMessage('Cleared all selections', 'success');
@@ -3583,6 +3954,38 @@
                 }
             });
 
+            // Validate: sliders >5 require justification spans
+            const missingJustifications = [];
+            complexityDimensions.forEach(dim => {
+                const score = complexityScores[dim.key] || 0;
+                if (score > DIFFICULTY_THRESHOLD) {
+                    const justification = difficultyJustifications.get(dim.key);
+                    const hasSpans = justification &&
+                        (justification.spans.premise.size > 0 || justification.spans.hypothesis.size > 0);
+                    if (!hasSpans) {
+                        missingJustifications.push(dim.label);
+                    }
+                }
+            });
+
+            if (missingJustifications.length > 0) {
+                const dimList = missingJustifications.join(', ');
+                showMessage(`High scores (>5) require justification spans for: ${dimList}`, 'error');
+                // Highlight the justification section
+                const justifySection = document.getElementById('difficulty-justification-section');
+                if (justifySection) {
+                    justifySection.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    justifySection.style.boxShadow = '0 0 0 3px var(--error)';
+                    setTimeout(() => {
+                        justifySection.style.boxShadow = '';
+                    }, 3000);
+                }
+                return;
+            }
+
+            // Get edge case flags and rationale
+            const edgeCaseData = getEdgeCaseData();
+
             try {
                 const resp = await authenticatedFetch('/api/label', {
                     method: 'POST',
@@ -3591,7 +3994,9 @@
                         example_id: currentExample.id,
                         labels: labelData,
                         complexity_scores: complexityScores,
-                        difficulty_justifications: difficultyJustificationData
+                        difficulty_justifications: difficultyJustificationData,
+                        edge_case_flags: edgeCaseData.flags,
+                        rationale: edgeCaseData.rationale
                     })
                 });
 

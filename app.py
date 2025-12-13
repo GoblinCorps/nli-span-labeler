@@ -36,6 +36,18 @@ Environment Variables:
     CALIBRATION_TEST_RATIO_NEW=0.8  - Test question ratio for new/provisional users (default: 0.8)
     CALIBRATION_TEST_RATIO_ESTABLISHED=0.1  - Test question ratio for calibrated users (default: 0.1)
     CONTROVERSIAL_THRESHOLD=0.5  - Auto-flag examples with agreement below this (default: 0.5)
+
+Rate Limiting:
+    RATE_LIMIT_ENABLED=1  - Enable/disable rate limiting (default: enabled)
+    RATE_LIMIT_AUTH=5/minute  - Limit for auth endpoints (login, register)
+    RATE_LIMIT_ANNOTATION=30/minute  - Limit for annotation endpoints (next, label, skip)
+    RATE_LIMIT_DEFAULT=60/minute  - Limit for all other endpoints
+
+CORS & Logging:
+    CORS_ORIGINS=https://example.com  - Comma-separated allowed origins (default: same-origin only)
+    CORS_ALLOW_CREDENTIALS=1  - Allow credentials in CORS requests (default: 1)
+    REQUEST_LOG_LEVEL=INFO  - Logging level for request logs (default: INFO)
+    REQUEST_LOG_FILE=/path/to/requests.log  - Optional file for request logs (default: stdout only)
 """
 
 import json
@@ -53,7 +65,13 @@ from collections import defaultdict
 from fastapi import FastAPI, HTTPException, Query, Request, Response, Depends, Cookie, Body
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+import time
+import logging
 
 # Tokenizer - using the actual training target model
 from transformers import AutoTokenizer
@@ -69,6 +87,26 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 # Configuration
 ANONYMOUS_MODE = os.environ.get("ANONYMOUS_MODE", "0") == "1"
 ALLOW_ANONYMOUS_SUBMISSIONS = os.environ.get("ALLOW_ANONYMOUS_SUBMISSIONS", "0") == "1"  # Allow logged-out users to submit
+
+# CORS configuration - comma-separated list of allowed origins (default: same-origin only)
+CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "").strip()
+CORS_ALLOW_CREDENTIALS = os.environ.get("CORS_ALLOW_CREDENTIALS", "1") == "1"
+
+# Request logging configuration
+REQUEST_LOG_LEVEL = os.environ.get("REQUEST_LOG_LEVEL", "INFO").upper()
+REQUEST_LOG_FILE = os.environ.get("REQUEST_LOG_FILE", "")  # Empty = stdout only
+
+# Set up request logger
+request_logger = logging.getLogger("nli.requests")
+request_logger.setLevel(getattr(logging, REQUEST_LOG_LEVEL, logging.INFO))
+if not request_logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    request_logger.addHandler(handler)
+    if REQUEST_LOG_FILE:
+        file_handler = logging.FileHandler(REQUEST_LOG_FILE)
+        file_handler.setFormatter(logging.Formatter("%(message)s"))
+        request_logger.addHandler(file_handler)
 SESSION_EXPIRY_DAYS = 30
 ANONYMOUS_USER_ID = 1
 LEGACY_USER_ID = 2
@@ -94,9 +132,46 @@ CALIBRATION_ROUTING_ENABLED = os.environ.get("CALIBRATION_ROUTING_ENABLED", "1")
 CALIBRATION_TEST_RATIO_NEW = float(os.environ.get("CALIBRATION_TEST_RATIO_NEW", "0.8"))  # 80% test questions for new users
 CALIBRATION_TEST_RATIO_ESTABLISHED = float(os.environ.get("CALIBRATION_TEST_RATIO_ESTABLISHED", "0.1"))  # 10% for drift detection
 
+# Rate limiting configuration
+RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "1") == "1"
+RATE_LIMIT_AUTH = os.environ.get("RATE_LIMIT_AUTH", "5/minute")  # Auth endpoints
+RATE_LIMIT_ANNOTATION = os.environ.get("RATE_LIMIT_ANNOTATION", "30/minute")  # Annotation endpoints
+RATE_LIMIT_DEFAULT = os.environ.get("RATE_LIMIT_DEFAULT", "60/minute")  # Everything else
+
 # Training configuration
 TRAINING_ENABLED = os.environ.get("TRAINING_ENABLED", "1") == "1"
 TRAINING_MIN_EXAMPLES = int(os.environ.get("TRAINING_MIN_EXAMPLES", "5"))  # Gold examples required to complete training
+
+
+def get_real_ip(request: Request) -> str:
+    """
+    Get the real client IP, respecting X-Forwarded-For for reverse proxy setups.
+
+    Priority:
+    1. X-Forwarded-For header (first IP in chain)
+    2. X-Real-IP header
+    3. Direct client IP
+    """
+    # X-Forwarded-For can be comma-separated list, first is original client
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+
+    # Some proxies use X-Real-IP
+    real_ip = request.headers.get("X-Real-IP")
+    if real_ip:
+        return real_ip.strip()
+
+    # Fall back to direct client
+    return get_remote_address(request)
+
+
+# Initialize rate limiter with proxy-aware key function
+limiter = Limiter(
+    key_func=get_real_ip,
+    enabled=RATE_LIMIT_ENABLED,
+    default_limits=[RATE_LIMIT_DEFAULT],
+)
 
 # Controversial example flagging configuration
 CONTROVERSIAL_THRESHOLD = float(os.environ.get("CONTROVERSIAL_THRESHOLD", "0.5"))  # Auto-flag when agreement below this
@@ -347,8 +422,98 @@ app = FastAPI(
     },
 )
 
+# Attach rate limiter to app
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # Mount static files
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
+
+
+# ============================================================================
+# CORS Middleware
+# ============================================================================
+
+def get_cors_origins() -> list[str]:
+    """Parse CORS_ORIGINS environment variable into list of allowed origins."""
+    if not CORS_ORIGINS:
+        return []  # No origins = same-origin only (restrictive default)
+    return [origin.strip() for origin in CORS_ORIGINS.split(",") if origin.strip()]
+
+cors_origins = get_cors_origins()
+if cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_credentials=CORS_ALLOW_CREDENTIALS,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["*"],
+    )
+
+
+# ============================================================================
+# Request Logging Middleware
+# ============================================================================
+
+def get_client_ip(request: Request) -> str:
+    """
+    Get client IP, respecting X-Forwarded-For for proxy deployments.
+
+    X-Forwarded-For format: client, proxy1, proxy2, ...
+    We want the leftmost (original client) IP.
+    """
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        # Take the first IP in the chain (original client)
+        return forwarded.split(",")[0].strip()
+    # Fall back to direct connection IP
+    if request.client:
+        return request.client.host
+    return "unknown"
+
+
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    """Log all requests with timing, IP, and user info."""
+    start_time = time.time()
+
+    # Get client IP (proxy-aware)
+    client_ip = get_client_ip(request)
+
+    # Process request
+    response = await call_next(request)
+
+    # Calculate duration
+    duration_ms = (time.time() - start_time) * 1000
+
+    # Try to get user ID from session (best effort)
+    user_id = "anon"
+    session_id = request.cookies.get("session_id")
+    if session_id:
+        try:
+            with get_db() as conn:
+                row = conn.execute(
+                    "SELECT user_id FROM sessions WHERE session_id = ?",
+                    (session_id,)
+                ).fetchone()
+                if row:
+                    user_id = f"user_{row['user_id']}"
+        except Exception:
+            pass  # Don't break request on logging failure
+
+    # Format: ISO timestamp | IP | METHOD /path | status | duration | user
+    timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    log_line = f"{timestamp} | {client_ip} | {request.method} {request.url.path} | {response.status_code} | {duration_ms:.0f}ms | {user_id}"
+
+    # Log at appropriate level based on status code
+    if response.status_code >= 500:
+        request_logger.error(log_line)
+    elif response.status_code >= 400:
+        request_logger.warning(log_line)
+    else:
+        request_logger.info(log_line)
+
+    return response
 
 
 # ============================================================================
@@ -2116,6 +2281,30 @@ class LeaderboardResponse(BaseModel):
     calibration_threshold: int = Field(..., description="Annotations needed for calibration")
 
 
+class ImportExample(BaseModel):
+    """Single example for bulk import."""
+    premise: str = Field(..., description="Premise text")
+    hypothesis: str = Field(..., description="Hypothesis text")
+    label: Optional[str] = Field(None, description="Gold label (entailment/neutral/contradiction)")
+    id: Optional[str] = Field(None, description="Optional example ID (auto-generated if not provided)")
+    source: Optional[str] = Field(None, description="Optional source/dataset metadata")
+
+
+class ImportRequest(BaseModel):
+    """Request body for bulk import."""
+    examples: list[ImportExample] = Field(..., description="List of examples to import")
+    dataset: str = Field("imported", description="Dataset name for imported examples")
+    skip_duplicates: bool = Field(True, description="Skip examples with duplicate IDs (vs error)")
+
+
+class ImportResponse(BaseModel):
+    """Response from bulk import."""
+    imported: int = Field(..., description="Number of examples successfully imported")
+    skipped: int = Field(0, description="Number of duplicates skipped")
+    errors: int = Field(0, description="Number of examples that failed to import")
+    dataset: str = Field(..., description="Dataset name used")
+
+
 # ============================================================================
 # Data Loading
 # ============================================================================
@@ -2209,7 +2398,8 @@ async def root():
     summary="Register a new user",
     description="Create a new user account. Returns a session cookie on success. Disabled when ANONYMOUS_MODE=1. If ADMIN_USER env var matches the username, user gets admin role.",
 )
-async def register(user: UserCreate, response: Response):
+@limiter.limit(RATE_LIMIT_AUTH)
+async def register(request: Request, user: UserCreate, response: Response):
     """Register a new user."""
     if ANONYMOUS_MODE:
         raise HTTPException(400, "Registration disabled in anonymous mode")
@@ -2265,7 +2455,8 @@ async def register(user: UserCreate, response: Response):
     summary="Log in",
     description="Authenticate with username and password. Returns a session cookie on success.",
 )
-async def login(user: UserLogin, response: Response):
+@limiter.limit(RATE_LIMIT_AUTH)
+async def login(request: Request, user: UserLogin, response: Response):
     """Log in a user."""
     if ANONYMOUS_MODE:
         raise HTTPException(400, "Login disabled in anonymous mode")
@@ -3903,6 +4094,183 @@ async def list_datasets():
     return {"datasets": sorted(datasets)}
 
 
+# Label text to integer mapping
+LABEL_MAP = {
+    "entailment": 0,
+    "neutral": 1,
+    "contradiction": 2,
+    "e": 0,
+    "n": 1,
+    "c": 2,
+    "0": 0,
+    "1": 1,
+    "2": 2,
+}
+
+
+@app.post(
+    "/api/import",
+    tags=["Admin"],
+    summary="Bulk import examples",
+    description="Import multiple NLI examples at once. Requires admin role. Accepts JSON array of examples.",
+    response_model=ImportResponse,
+)
+@limiter.limit(RATE_LIMIT_AUTH)  # Strict limit for admin import
+async def bulk_import_examples(
+    http_request: Request,
+    request: ImportRequest,
+    admin: dict = Depends(require_admin),
+):
+    """Bulk import NLI examples into the database."""
+    imported = 0
+    skipped = 0
+    errors = 0
+
+    with get_db() as conn:
+        for i, ex in enumerate(request.examples):
+            try:
+                # Generate ID if not provided
+                example_id = ex.id or f"{request.dataset}_{i}_{secrets.token_hex(4)}"
+
+                # Parse label
+                label_int = None
+                label_text = None
+                if ex.label:
+                    label_lower = ex.label.lower().strip()
+                    label_int = LABEL_MAP.get(label_lower)
+                    if label_int is not None:
+                        label_text = ["entailment", "neutral", "contradiction"][label_int]
+                    else:
+                        # Try to parse as integer directly
+                        try:
+                            label_int = int(ex.label)
+                            if 0 <= label_int <= 2:
+                                label_text = ["entailment", "neutral", "contradiction"][label_int]
+                            else:
+                                label_int = None
+                        except ValueError:
+                            pass
+
+                # Insert into database
+                cursor = conn.execute("""
+                    INSERT OR IGNORE INTO examples
+                    (id, dataset, premise, hypothesis, gold_label, gold_label_text, source_file, pool_status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'zero_entry')
+                """, (
+                    example_id,
+                    request.dataset,
+                    ex.premise,
+                    ex.hypothesis,
+                    label_int,
+                    label_text,
+                    ex.source or "api_import"
+                ))
+
+                if cursor.rowcount > 0:
+                    imported += 1
+                else:
+                    skipped += 1
+
+            except Exception as e:
+                errors += 1
+                print(f"Error importing example {i}: {e}")
+
+    return ImportResponse(
+        imported=imported,
+        skipped=skipped,
+        errors=errors,
+        dataset=request.dataset
+    )
+
+
+@app.post(
+    "/api/import/jsonl",
+    tags=["Admin"],
+    summary="Import from JSONL content",
+    description="Import examples from JSONL format (one JSON object per line). Requires admin role.",
+    response_model=ImportResponse,
+)
+@limiter.limit(RATE_LIMIT_AUTH)  # Strict limit for admin import
+async def import_jsonl(
+    request: Request,
+    content: str = Body(..., media_type="text/plain", description="JSONL content (one JSON object per line)"),
+    dataset: str = Query("imported", description="Dataset name for imported examples"),
+    skip_duplicates: bool = Query(True, description="Skip duplicates instead of erroring"),
+    admin: dict = Depends(require_admin),
+):
+    """Import examples from JSONL format."""
+    imported = 0
+    skipped = 0
+    errors = 0
+
+    with get_db() as conn:
+        for i, line in enumerate(content.strip().split("\n")):
+            if not line.strip():
+                continue
+            try:
+                ex = json.loads(line)
+
+                # Generate ID if not provided
+                example_id = ex.get("id") or f"{dataset}_{i}_{secrets.token_hex(4)}"
+
+                # Parse label
+                label_raw = ex.get("label") or ex.get("gold_label")
+                label_int = None
+                label_text = None
+                if label_raw is not None:
+                    if isinstance(label_raw, int):
+                        label_int = label_raw
+                        if 0 <= label_int <= 2:
+                            label_text = ["entailment", "neutral", "contradiction"][label_int]
+                    else:
+                        label_lower = str(label_raw).lower().strip()
+                        label_int = LABEL_MAP.get(label_lower)
+                        if label_int is not None:
+                            label_text = ["entailment", "neutral", "contradiction"][label_int]
+
+                # Get premise/hypothesis (handle various field names)
+                premise = ex.get("premise") or ex.get("sentence1") or ""
+                hypothesis = ex.get("hypothesis") or ex.get("sentence2") or ""
+
+                if not premise or not hypothesis:
+                    errors += 1
+                    continue
+
+                # Insert into database
+                cursor = conn.execute("""
+                    INSERT OR IGNORE INTO examples
+                    (id, dataset, premise, hypothesis, gold_label, gold_label_text, source_file, pool_status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'zero_entry')
+                """, (
+                    example_id,
+                    dataset,
+                    premise,
+                    hypothesis,
+                    label_int,
+                    label_text,
+                    ex.get("source") or "jsonl_import"
+                ))
+
+                if cursor.rowcount > 0:
+                    imported += 1
+                else:
+                    skipped += 1
+
+            except json.JSONDecodeError as e:
+                errors += 1
+                print(f"JSON parse error on line {i}: {e}")
+            except Exception as e:
+                errors += 1
+                print(f"Error importing line {i}: {e}")
+
+    return ImportResponse(
+        imported=imported,
+        skipped=skipped,
+        errors=errors,
+        dataset=dataset
+    )
+
+
 # ============================================================================
 # API Endpoints - Locking
 # ============================================================================
@@ -4392,12 +4760,23 @@ async def get_reliability_leaderboard(
 """,
     response_model=ExampleResponse,
 )
+@limiter.limit(RATE_LIMIT_ANNOTATION)
 async def get_next_example(
+    request: Request,
     dataset: str = Query(None, description="Filter by dataset (snli, mnli, anli, etc.)"),
+    gold_label: str = Query(None, description="Filter by gold label (entailment, neutral, contradiction)"),
     user: dict = Depends(get_current_user)
 ):
     """Get the next example to annotate with calibration-aware routing."""
     user_id = user["id"]
+
+    # Convert gold_label text to numeric if provided
+    gold_label_num = None
+    if gold_label:
+        label_map = {"entailment": 0, "e": 0, "neutral": 1, "n": 1, "contradiction": 2, "c": 2}
+        gold_label_num = label_map.get(gold_label.lower())
+        if gold_label_num is None:
+            raise HTTPException(400, f"Invalid gold_label: {gold_label}. Use entailment/neutral/contradiction")
 
     with get_db() as conn:
         # Clean up expired locks
@@ -4438,6 +4817,10 @@ async def get_next_example(
                 query += " AND e.dataset = ?"
                 params.append(dataset)
 
+            if gold_label_num is not None:
+                query += " AND e.gold_label = ?"
+                params.append(gold_label_num)
+
             query += " ORDER BY RANDOM() LIMIT 1"
             row = conn.execute(query, params).fetchone()
 
@@ -4460,6 +4843,10 @@ async def get_next_example(
             if dataset:
                 query += " AND e.dataset = ?"
                 params.append(dataset)
+
+            if gold_label_num is not None:
+                query += " AND e.gold_label = ?"
+                params.append(gold_label_num)
 
             query += " ORDER BY pool_priority, RANDOM() LIMIT 1"
             row = conn.execute(query, params).fetchone()
@@ -4598,7 +4985,9 @@ async def get_example(
     summary="Submit annotation",
     description="Submit span labels and complexity scores for an example. Automatically releases any lock. Updates agreement metrics.",
 )
+@limiter.limit(RATE_LIMIT_ANNOTATION)
 async def submit_annotation(
+    request: Request,
     submission: AnnotationSubmission,
     user: dict = Depends(get_current_user)
 ):
@@ -4699,7 +5088,9 @@ async def submit_annotation(
     summary="Skip example",
     description="Mark an example as skipped. Skipped examples won't appear in /api/next for the current user. Releases any lock on the example.",
 )
+@limiter.limit(RATE_LIMIT_ANNOTATION)
 async def skip_example(
+    request: Request,
     example_id: str,
     user: dict = Depends(get_current_user)
 ):
