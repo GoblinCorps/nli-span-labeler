@@ -36,6 +36,10 @@ Environment Variables:
     CALIBRATION_TEST_RATIO_NEW=0.8  - Test question ratio for new/provisional users (default: 0.8)
     CALIBRATION_TEST_RATIO_ESTABLISHED=0.1  - Test question ratio for calibrated users (default: 0.1)
     CONTROVERSIAL_THRESHOLD=0.5  - Auto-flag examples with agreement below this (default: 0.5)
+    CORS_ORIGINS=https://example.com  - Comma-separated allowed origins (default: same-origin only)
+    CORS_ALLOW_CREDENTIALS=1  - Allow credentials in CORS requests (default: 1)
+    REQUEST_LOG_LEVEL=INFO  - Logging level for request logs (default: INFO)
+    REQUEST_LOG_FILE=/path/to/requests.log  - Optional file for request logs (default: stdout only)
 """
 
 import json
@@ -53,7 +57,10 @@ from collections import defaultdict
 from fastapi import FastAPI, HTTPException, Query, Request, Response, Depends, Cookie, Body
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+import time
+import logging
 
 # Tokenizer - using the actual training target model
 from transformers import AutoTokenizer
@@ -69,6 +76,26 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 # Configuration
 ANONYMOUS_MODE = os.environ.get("ANONYMOUS_MODE", "0") == "1"
 ALLOW_ANONYMOUS_SUBMISSIONS = os.environ.get("ALLOW_ANONYMOUS_SUBMISSIONS", "0") == "1"  # Allow logged-out users to submit
+
+# CORS configuration - comma-separated list of allowed origins (default: same-origin only)
+CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "").strip()
+CORS_ALLOW_CREDENTIALS = os.environ.get("CORS_ALLOW_CREDENTIALS", "1") == "1"
+
+# Request logging configuration
+REQUEST_LOG_LEVEL = os.environ.get("REQUEST_LOG_LEVEL", "INFO").upper()
+REQUEST_LOG_FILE = os.environ.get("REQUEST_LOG_FILE", "")  # Empty = stdout only
+
+# Set up request logger
+request_logger = logging.getLogger("nli.requests")
+request_logger.setLevel(getattr(logging, REQUEST_LOG_LEVEL, logging.INFO))
+if not request_logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    request_logger.addHandler(handler)
+    if REQUEST_LOG_FILE:
+        file_handler = logging.FileHandler(REQUEST_LOG_FILE)
+        file_handler.setFormatter(logging.Formatter("%(message)s"))
+        request_logger.addHandler(file_handler)
 SESSION_EXPIRY_DAYS = 30
 ANONYMOUS_USER_ID = 1
 LEGACY_USER_ID = 2
@@ -349,6 +376,92 @@ app = FastAPI(
 
 # Mount static files
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
+
+
+# ============================================================================
+# CORS Middleware
+# ============================================================================
+
+def get_cors_origins() -> list[str]:
+    """Parse CORS_ORIGINS environment variable into list of allowed origins."""
+    if not CORS_ORIGINS:
+        return []  # No origins = same-origin only (restrictive default)
+    return [origin.strip() for origin in CORS_ORIGINS.split(",") if origin.strip()]
+
+cors_origins = get_cors_origins()
+if cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_credentials=CORS_ALLOW_CREDENTIALS,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["*"],
+    )
+
+
+# ============================================================================
+# Request Logging Middleware
+# ============================================================================
+
+def get_client_ip(request: Request) -> str:
+    """
+    Get client IP, respecting X-Forwarded-For for proxy deployments.
+
+    X-Forwarded-For format: client, proxy1, proxy2, ...
+    We want the leftmost (original client) IP.
+    """
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        # Take the first IP in the chain (original client)
+        return forwarded.split(",")[0].strip()
+    # Fall back to direct connection IP
+    if request.client:
+        return request.client.host
+    return "unknown"
+
+
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    """Log all requests with timing, IP, and user info."""
+    start_time = time.time()
+
+    # Get client IP (proxy-aware)
+    client_ip = get_client_ip(request)
+
+    # Process request
+    response = await call_next(request)
+
+    # Calculate duration
+    duration_ms = (time.time() - start_time) * 1000
+
+    # Try to get user ID from session (best effort)
+    user_id = "anon"
+    session_id = request.cookies.get("session_id")
+    if session_id:
+        try:
+            with get_db() as conn:
+                row = conn.execute(
+                    "SELECT user_id FROM sessions WHERE session_id = ?",
+                    (session_id,)
+                ).fetchone()
+                if row:
+                    user_id = f"user_{row['user_id']}"
+        except Exception:
+            pass  # Don't break request on logging failure
+
+    # Format: ISO timestamp | IP | METHOD /path | status | duration | user
+    timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    log_line = f"{timestamp} | {client_ip} | {request.method} {request.url.path} | {response.status_code} | {duration_ms:.0f}ms | {user_id}"
+
+    # Log at appropriate level based on status code
+    if response.status_code >= 500:
+        request_logger.error(log_line)
+    elif response.status_code >= 400:
+        request_logger.warning(log_line)
+    else:
+        request_logger.info(log_line)
+
+    return response
 
 
 # ============================================================================

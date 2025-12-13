@@ -30,3 +30,4 @@ data/nli/*.jsonl
 # Exports
 *.jsonl
 !scripts/*.jsonl
+nli_session_state.json
