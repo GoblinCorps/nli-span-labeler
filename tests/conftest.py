@@ -18,47 +18,17 @@ os.environ["ANONYMOUS_MODE"] = "0"
 os.environ["ADMIN_USER"] = "test_admin"
 
 
-@pytest.fixture(scope="session")
-def temp_db_path() -> Generator[Path, None, None]:
-    """Create a temporary database file for the test session."""
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        db_path = Path(f.name)
-    yield db_path
-    # Cleanup after all tests
-    if db_path.exists():
-        db_path.unlink()
-
-
-@pytest.fixture(scope="session")
-def app(temp_db_path: Path):
-    """Create FastAPI app with test database."""
-    import app as app_module
-
-    # Override database path
-    app_module.DB_PATH = temp_db_path
-
-    # Initialize database
-    app_module.init_db()
-
-    return app_module.app
-
-
-@pytest.fixture(scope="session")
-def client(app) -> Generator[TestClient, None, None]:
-    """Create test client for the session."""
-    with TestClient(app) as c:
-        yield c
-
-
 @pytest.fixture
-def fresh_client(temp_db_path: Path) -> Generator[TestClient, None, None]:
+def fresh_client() -> Generator[TestClient, None, None]:
     """Create a fresh test client with clean database for each test."""
-    import importlib
     import app as app_module
 
     # Create new temp db for this test
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         test_db = Path(f.name)
+
+    # Save original DB_PATH
+    original_db_path = app_module.DB_PATH
 
     app_module.DB_PATH = test_db
     app_module.init_db()
@@ -66,69 +36,210 @@ def fresh_client(temp_db_path: Path) -> Generator[TestClient, None, None]:
     with TestClient(app_module.app) as c:
         yield c
 
+    # Restore original path
+    app_module.DB_PATH = original_db_path
+
     if test_db.exists():
         test_db.unlink()
 
 
 @pytest.fixture
-def auth_client(client: TestClient) -> Generator[tuple[TestClient, dict], None, None]:
-    """Create authenticated test client with a registered user."""
-    # Register a test user
-    response = client.post("/api/auth/register", json={
-        "username": f"testuser_{os.urandom(4).hex()}",
-        "password": "testpass123",
-        "display_name": "Test User"
-    })
-    assert response.status_code == 200
-    user_data = response.json()
-
-    # Client now has session cookie from registration
-    yield client, user_data
-
-
-@pytest.fixture
-def admin_client(client: TestClient) -> Generator[tuple[TestClient, dict], None, None]:
-    """Create authenticated test client with admin user."""
-    # Register as the admin user (ADMIN_USER env var)
-    response = client.post("/api/auth/register", json={
-        "username": "test_admin",
-        "password": "adminpass123",
-        "display_name": "Test Admin"
-    })
-
-    if response.status_code == 400:
-        # Already registered, login instead
-        response = client.post("/api/auth/login", json={
-            "username": "test_admin",
-            "password": "adminpass123"
-        })
-
-    assert response.status_code == 200
-    user_data = response.json()
-
-    yield client, user_data
-
-
-@pytest.fixture
-def sample_example(admin_client: tuple[TestClient, dict]) -> dict:
-    """Create a sample example in the database for testing."""
-    client, admin = admin_client
-
-    # We need to insert an example directly since there's no API for it
+def auth_client() -> Generator[tuple[TestClient, dict], None, None]:
+    """Create authenticated test client with a registered user (empty examples table)."""
     import app as app_module
 
-    with app_module.get_db() as conn:
-        cursor = conn.execute("""
-            INSERT INTO examples (dataset, premise, hypothesis, label, idx)
-            VALUES (?, ?, ?, ?, ?)
-        """, ("test_dataset", "The cat sat on the mat.", "The cat is sitting.", "entailment", 0))
-        example_id = cursor.lastrowid
-        conn.commit()
+    # Create new temp db for this test
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        test_db = Path(f.name)
 
-    return {
-        "id": example_id,
-        "dataset": "test_dataset",
-        "premise": "The cat sat on the mat.",
-        "hypothesis": "The cat is sitting.",
-        "label": "entailment"
-    }
+    # Save original DB_PATH
+    original_db_path = app_module.DB_PATH
+
+    app_module.DB_PATH = test_db
+    app_module.init_db()
+
+    with TestClient(app_module.app) as client:
+        # Clear examples loaded by startup event (for tests that need empty DB)
+        with app_module.get_db() as conn:
+            conn.execute("DELETE FROM examples")
+            conn.commit()
+
+        # Register a test user
+        response = client.post("/api/auth/register", json={
+            "username": f"testuser_{os.urandom(4).hex()}",
+            "password": "testpass123",
+            "display_name": "Test User"
+        })
+        assert response.status_code == 200
+        user_data = response.json()
+
+        # Client now has session cookie from registration
+        yield client, user_data
+
+    # Restore original path
+    app_module.DB_PATH = original_db_path
+
+    if test_db.exists():
+        test_db.unlink()
+
+
+@pytest.fixture
+def admin_client() -> Generator[tuple[TestClient, dict], None, None]:
+    """Create authenticated test client with admin user."""
+    import app as app_module
+
+    # Create new temp db for this test
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        test_db = Path(f.name)
+
+    # Save original DB_PATH
+    original_db_path = app_module.DB_PATH
+
+    app_module.DB_PATH = test_db
+    app_module.init_db()
+
+    with TestClient(app_module.app) as client:
+        # Register as the admin user (ADMIN_USER env var)
+        response = client.post("/api/auth/register", json={
+            "username": "test_admin",
+            "password": "adminpass123",
+            "display_name": "Test Admin"
+        })
+
+        if response.status_code == 400:
+            # Already registered, login instead
+            response = client.post("/api/auth/login", json={
+                "username": "test_admin",
+                "password": "adminpass123"
+            })
+
+        assert response.status_code == 200
+        user_data = response.json()
+
+        yield client, user_data
+
+    # Restore original path
+    app_module.DB_PATH = original_db_path
+
+    if test_db.exists():
+        test_db.unlink()
+
+
+@pytest.fixture
+def auth_client_with_example() -> Generator[tuple[TestClient, dict, dict], None, None]:
+    """Create authenticated test client with a sample example in the database.
+
+    Returns: (client, user_data, example_data)
+    """
+    import app as app_module
+
+    # Create new temp db for this test
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        test_db = Path(f.name)
+
+    # Save original DB_PATH
+    original_db_path = app_module.DB_PATH
+
+    app_module.DB_PATH = test_db
+    app_module.init_db()
+
+    with TestClient(app_module.app) as client:
+        # Clear examples loaded by startup event (we want only our test example)
+        with app_module.get_db() as conn:
+            conn.execute("DELETE FROM examples")
+            conn.commit()
+
+        # Register a test user
+        response = client.post("/api/auth/register", json={
+            "username": f"testuser_{os.urandom(4).hex()}",
+            "password": "testpass123",
+            "display_name": "Test User"
+        })
+        assert response.status_code == 200
+        user_data = response.json()
+
+        # Insert sample example
+        example_id = f"test_example_{os.urandom(4).hex()}"
+        with app_module.get_db() as conn:
+            conn.execute("""
+                INSERT INTO examples (id, dataset, premise, hypothesis, gold_label, gold_label_text)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (example_id, "test_dataset", "The cat sat on the mat.", "The cat is sitting.", 0, "entailment"))
+            conn.commit()
+
+        example_data = {
+            "id": example_id,
+            "dataset": "test_dataset",
+            "premise": "The cat sat on the mat.",
+            "hypothesis": "The cat is sitting.",
+            "gold_label": 0,
+            "gold_label_text": "entailment"
+        }
+
+        yield client, user_data, example_data
+
+    # Restore original path
+    app_module.DB_PATH = original_db_path
+
+    if test_db.exists():
+        test_db.unlink()
+
+
+@pytest.fixture
+def admin_client_with_example() -> Generator[tuple[TestClient, dict, dict], None, None]:
+    """Create admin test client with a sample example in the database.
+
+    Returns: (client, admin_data, example_data)
+    """
+    import app as app_module
+
+    # Create new temp db for this test
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        test_db = Path(f.name)
+
+    # Save original DB_PATH
+    original_db_path = app_module.DB_PATH
+
+    app_module.DB_PATH = test_db
+    app_module.init_db()
+
+    with TestClient(app_module.app) as client:
+        # Clear examples loaded by startup event (we want only our test example)
+        with app_module.get_db() as conn:
+            conn.execute("DELETE FROM examples")
+            conn.commit()
+
+        # Register as admin
+        response = client.post("/api/auth/register", json={
+            "username": "test_admin",
+            "password": "adminpass123",
+            "display_name": "Test Admin"
+        })
+        assert response.status_code == 200
+        admin_data = response.json()
+
+        # Insert sample example
+        example_id = f"test_example_{os.urandom(4).hex()}"
+        with app_module.get_db() as conn:
+            conn.execute("""
+                INSERT INTO examples (id, dataset, premise, hypothesis, gold_label, gold_label_text)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (example_id, "test_dataset", "The cat sat on the mat.", "The cat is sitting.", 0, "entailment"))
+            conn.commit()
+
+        example_data = {
+            "id": example_id,
+            "dataset": "test_dataset",
+            "premise": "The cat sat on the mat.",
+            "hypothesis": "The cat is sitting.",
+            "gold_label": 0,
+            "gold_label_text": "entailment"
+        }
+
+        yield client, admin_data, example_data
+
+    # Restore original path
+    app_module.DB_PATH = original_db_path
+
+    if test_db.exists():
+        test_db.unlink()
