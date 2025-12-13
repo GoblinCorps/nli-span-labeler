@@ -8,7 +8,7 @@ Features:
 - Pre-filled labels for difficulty dimensions and NLI relations
 - Custom label creation with unique colors
 - Multiple labels per token visualization
-- Complexity scoring (1-100 scale)
+- Complexity scoring (0-10 scale)
 - SQLite persistence
 - Stats dashboard and export
 - Multi-user support with session-based authentication
@@ -25,6 +25,7 @@ Usage:
 
 Environment Variables:
     ANONYMOUS_MODE=1  - Disable auth, use anonymous user (for local single-user)
+    ALLOW_ANONYMOUS_SUBMISSIONS=1  - Allow logged-out users to submit (modal dismissable)
     TOKENIZER_MODEL=answerdotai/ModernBERT-base  - HuggingFace model for tokenizer
     LOCK_TIMEOUT_MINUTES=30  - How long example locks last (default: 30)
     ADMIN_USER=username  - Bootstrap admin user (gets admin role on startup)
@@ -67,6 +68,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # Configuration
 ANONYMOUS_MODE = os.environ.get("ANONYMOUS_MODE", "0") == "1"
+ALLOW_ANONYMOUS_SUBMISSIONS = os.environ.get("ALLOW_ANONYMOUS_SUBMISSIONS", "0") == "1"  # Allow logged-out users to submit
 SESSION_EXPIRY_DAYS = 30
 ANONYMOUS_USER_ID = 1
 LEGACY_USER_ID = 2
@@ -98,6 +100,79 @@ TRAINING_MIN_EXAMPLES = int(os.environ.get("TRAINING_MIN_EXAMPLES", "5"))  # Gol
 
 # Controversial example flagging configuration
 CONTROVERSIAL_THRESHOLD = float(os.environ.get("CONTROVERSIAL_THRESHOLD", "0.5"))  # Auto-flag when agreement below this
+
+# ============================================================================
+# Tiered Annotation System
+# ============================================================================
+
+# Tier 0: Fully automatic labels (computed deterministically)
+TIER0_WORDLISTS = {
+    "negation": {
+        "not", "no", "never", "nobody", "nothing", "nowhere", "neither", "none",
+        "n't", "cannot", "can't", "won't", "don't", "doesn't", "didn't", "isn't",
+        "aren't", "wasn't", "weren't", "hasn't", "haven't", "hadn't", "without",
+        "lack", "lacking", "fail", "failed", "refuse", "refused"
+    },
+    "quantifier": {
+        "all", "every", "each", "any", "some", "most", "many", "few", "several",
+        "both", "none", "no", "half", "majority", "minority", "numerous", "countless"
+    },
+    "modal": {
+        "might", "may", "could", "would", "should", "must", "can", "will", "shall", "ought"
+    },
+    "conditional": {
+        "if", "unless", "when", "whenever", "provided", "assuming", "suppose",
+        "supposing", "whether", "in case", "as long as"
+    },
+    "temporal": {
+        "before", "after", "during", "while", "when", "until", "since", "always",
+        "never", "sometimes", "often", "rarely", "occasionally", "frequently",
+        "constantly", "already", "yet", "still", "now", "then", "soon", "later",
+        "earlier", "recently", "formerly", "previously"
+    },
+    "causal": {
+        "because", "since", "therefore", "thus", "hence", "consequently", "so",
+        "as a result", "due to", "owing to", "caused", "causes", "causing",
+        "leads to", "results in"
+    }
+}
+
+# Tier 1: Weak supervision labels (auto-generated, spot-checked)
+# Requires NLTK WordNet for semantic relations
+TIER1_LABELS = ["hypernym", "hyponym", "synonym", "antonym", "meronym", "holonym", "numeric_mismatch", "entity_alignment"]
+
+# WordNet initialization flag
+_wordnet_initialized = False
+
+def ensure_wordnet_data():
+    """Download WordNet data if not already present."""
+    global _wordnet_initialized
+    if _wordnet_initialized:
+        return True
+    try:
+        import nltk
+        from nltk.corpus import wordnet
+        # Test if data is available
+        wordnet.synsets("test")
+        _wordnet_initialized = True
+        return True
+    except LookupError:
+        try:
+            import nltk
+            nltk.download("wordnet", quiet=True)
+            nltk.download("omw-1.4", quiet=True)  # Open Multilingual WordNet
+            _wordnet_initialized = True
+            return True
+        except Exception as e:
+            print(f"Warning: Could not download WordNet data: {e}")
+            return False
+    except ImportError:
+        print("Warning: NLTK not installed, Tier 1 labels unavailable")
+        return False
+
+# Tier 1 configuration
+TIER1_QUALITY_SAMPLE_RATE = float(os.environ.get("TIER1_QUALITY_SAMPLE_RATE", "0.05"))  # 5% spot-check rate
+TIER1_MIN_PRECISION = float(os.environ.get("TIER1_MIN_PRECISION", "0.90"))  # 90% precision threshold
 
 # ============================================================================
 # Label Schema Configuration
@@ -166,7 +241,7 @@ A multi-user annotation tool for Natural Language Inference (NLI) examples with 
 
 - **Span-level annotation**: Select specific tokens in premise/hypothesis pairs
 - **Multiple labels per token**: Annotate tokens with multiple semantic labels
-- **Complexity scoring**: Rate examples on 6 difficulty dimensions (1-100 scale)
+- **Complexity scoring**: Rate examples on 6 difficulty dimensions (0-10 scale)
 - **Multi-user support**: Session-based authentication with per-user annotation tracking
 - **Role-based access**: Admin and annotator roles with protected endpoints
 - **WordPiece tokenization**: Uses ModernBERT tokenizer for model-aligned annotations
@@ -325,8 +400,305 @@ def tokenize_text(text: str) -> list[dict]:
             "char_end": char_end,
             "is_subword": is_subword,
         })
-    
+
     return words
+
+
+# ============================================================================
+# Tier 0: Automatic Label Computation
+# ============================================================================
+
+def compute_tier0_labels(premise: str, hypothesis: str, premise_tokens: list[dict], hypothesis_tokens: list[dict]) -> dict:
+    """
+    Compute Tier 0 automatic labels for an example.
+
+    Returns dict mapping label_name -> {premise: [indices], hypothesis: [indices]}
+    """
+    result = {}
+
+    # Get token texts (lowercase for matching)
+    premise_texts = [t["text"].lower() for t in premise_tokens]
+    hypothesis_texts = [t["text"].lower() for t in hypothesis_tokens]
+
+    # Token alignment labels
+    premise_set = set(premise_texts)
+    hypothesis_set = set(hypothesis_texts)
+
+    # aligned_tokens: tokens appearing in both
+    result["aligned_tokens"] = {
+        "premise": [i for i, t in enumerate(premise_texts) if t in hypothesis_set],
+        "hypothesis": [i for i, t in enumerate(hypothesis_texts) if t in premise_set]
+    }
+
+    # premise_only: tokens only in premise
+    result["premise_only"] = {
+        "premise": [i for i, t in enumerate(premise_texts) if t not in hypothesis_set],
+        "hypothesis": []
+    }
+
+    # hypothesis_only: tokens only in hypothesis
+    result["hypothesis_only"] = {
+        "premise": [],
+        "hypothesis": [i for i, t in enumerate(hypothesis_texts) if t not in premise_set]
+    }
+
+    # Wordlist-based detection
+    for label_name, wordlist in TIER0_WORDLISTS.items():
+        premise_matches = []
+        hypothesis_matches = []
+
+        for i, token in enumerate(premise_texts):
+            # Check exact match or if token contains any wordlist entry
+            if token in wordlist:
+                premise_matches.append(i)
+            else:
+                # Check for contractions and multi-word entries
+                for word in wordlist:
+                    if word in token or token.endswith(word):
+                        premise_matches.append(i)
+                        break
+
+        for i, token in enumerate(hypothesis_texts):
+            if token in wordlist:
+                hypothesis_matches.append(i)
+            else:
+                for word in wordlist:
+                    if word in token or token.endswith(word):
+                        hypothesis_matches.append(i)
+                        break
+
+        result[label_name] = {
+            "premise": premise_matches,
+            "hypothesis": hypothesis_matches
+        }
+
+    return result
+
+
+# ============================================================================
+# Tier 1: WordNet-based Semantic Relation Detection
+# ============================================================================
+
+def get_wordnet_relations(word: str) -> dict:
+    """
+    Get all WordNet semantic relations for a word.
+
+    Returns dict with sets of related words for each relation type.
+    """
+    relations = {
+        "hypernyms": set(),    # More general terms (dog -> animal)
+        "hyponyms": set(),     # More specific terms (animal -> dog)
+        "synonyms": set(),     # Same meaning (big -> large)
+        "antonyms": set(),     # Opposite meaning (hot -> cold)
+        "meronyms": set(),     # Part-of relations (car -> wheel)
+        "holonyms": set()      # Whole-of relations (wheel -> car)
+    }
+
+    if not ensure_wordnet_data():
+        return relations
+
+    try:
+        from nltk.corpus import wordnet
+
+        synsets = wordnet.synsets(word)
+        for synset in synsets:
+            # Synonyms: all lemmas in the synset
+            for lemma in synset.lemmas():
+                if lemma.name().lower() != word.lower():
+                    relations["synonyms"].add(lemma.name().lower().replace("_", " "))
+
+                # Antonyms: from lemma antonyms
+                for antonym in lemma.antonyms():
+                    relations["antonyms"].add(antonym.name().lower().replace("_", " "))
+
+            # Hypernyms: more general concepts
+            for hypernym in synset.hypernyms():
+                for lemma in hypernym.lemmas():
+                    relations["hypernyms"].add(lemma.name().lower().replace("_", " "))
+
+            # Hyponyms: more specific concepts
+            for hyponym in synset.hyponyms():
+                for lemma in hyponym.lemmas():
+                    relations["hyponyms"].add(lemma.name().lower().replace("_", " "))
+
+            # Meronyms: parts of this concept
+            for meronym in synset.part_meronyms() + synset.substance_meronyms() + synset.member_meronyms():
+                for lemma in meronym.lemmas():
+                    relations["meronyms"].add(lemma.name().lower().replace("_", " "))
+
+            # Holonyms: wholes that contain this concept
+            for holonym in synset.part_holonyms() + synset.substance_holonyms() + synset.member_holonyms():
+                for lemma in holonym.lemmas():
+                    relations["holonyms"].add(lemma.name().lower().replace("_", " "))
+
+    except Exception as e:
+        # Silently fail for individual words
+        pass
+
+    return relations
+
+
+def compute_tier1_labels(premise: str, hypothesis: str, premise_tokens: list[dict], hypothesis_tokens: list[dict]) -> dict:
+    """
+    Compute Tier 1 weak supervision labels using WordNet semantic relations.
+
+    Detects when tokens in hypothesis have semantic relations to premise tokens:
+    - hypernym: hypothesis token is more general than premise token
+    - hyponym: hypothesis token is more specific than premise token
+    - synonym: hypothesis token has same meaning as premise token
+    - antonym: hypothesis token has opposite meaning to premise token
+    - meronym: hypothesis token is a part of something in premise
+    - holonym: hypothesis token is a whole containing something in premise
+
+    Returns dict mapping label_name -> {premise: [indices], hypothesis: [indices]}
+    """
+    result = {
+        "hypernym": {"premise": [], "hypothesis": []},
+        "hyponym": {"premise": [], "hypothesis": []},
+        "synonym": {"premise": [], "hypothesis": []},
+        "antonym": {"premise": [], "hypothesis": []},
+        "meronym": {"premise": [], "hypothesis": []},
+        "holonym": {"premise": [], "hypothesis": []}
+    }
+
+    if not ensure_wordnet_data():
+        return result
+
+    # Get token texts
+    premise_texts = [t["text"].lower() for t in premise_tokens]
+    hypothesis_texts = [t["text"].lower() for t in hypothesis_tokens]
+
+    # Build WordNet relation maps for premise tokens
+    premise_relations = {}
+    for i, token in enumerate(premise_texts):
+        # Skip very short tokens and punctuation
+        if len(token) < 2 or not token.isalpha():
+            continue
+        premise_relations[i] = get_wordnet_relations(token)
+
+    # Check each hypothesis token against premise relations
+    for h_idx, h_token in enumerate(hypothesis_texts):
+        if len(h_token) < 2 or not h_token.isalpha():
+            continue
+
+        h_token_lower = h_token.lower()
+
+        for p_idx, p_relations in premise_relations.items():
+            p_token = premise_texts[p_idx]
+
+            # Skip if same token (already covered by Tier 0 alignment)
+            if h_token_lower == p_token:
+                continue
+
+            # Check if hypothesis token appears in premise token's relations
+            # hypernym: h is more general than p (p's hypernym contains h)
+            if h_token_lower in p_relations["hypernyms"]:
+                if p_idx not in result["hypernym"]["premise"]:
+                    result["hypernym"]["premise"].append(p_idx)
+                if h_idx not in result["hypernym"]["hypothesis"]:
+                    result["hypernym"]["hypothesis"].append(h_idx)
+
+            # hyponym: h is more specific than p (p's hyponym contains h)
+            if h_token_lower in p_relations["hyponyms"]:
+                if p_idx not in result["hyponym"]["premise"]:
+                    result["hyponym"]["premise"].append(p_idx)
+                if h_idx not in result["hyponym"]["hypothesis"]:
+                    result["hyponym"]["hypothesis"].append(h_idx)
+
+            # synonym: h has same meaning as p
+            if h_token_lower in p_relations["synonyms"]:
+                if p_idx not in result["synonym"]["premise"]:
+                    result["synonym"]["premise"].append(p_idx)
+                if h_idx not in result["synonym"]["hypothesis"]:
+                    result["synonym"]["hypothesis"].append(h_idx)
+
+            # antonym: h is opposite of p
+            if h_token_lower in p_relations["antonyms"]:
+                if p_idx not in result["antonym"]["premise"]:
+                    result["antonym"]["premise"].append(p_idx)
+                if h_idx not in result["antonym"]["hypothesis"]:
+                    result["antonym"]["hypothesis"].append(h_idx)
+
+            # meronym: h is a part of p (p's meronyms contains h)
+            if h_token_lower in p_relations["meronyms"]:
+                if p_idx not in result["meronym"]["premise"]:
+                    result["meronym"]["premise"].append(p_idx)
+                if h_idx not in result["meronym"]["hypothesis"]:
+                    result["meronym"]["hypothesis"].append(h_idx)
+
+            # holonym: h is a whole containing p (p's holonyms contains h)
+            if h_token_lower in p_relations["holonyms"]:
+                if p_idx not in result["holonym"]["premise"]:
+                    result["holonym"]["premise"].append(p_idx)
+                if h_idx not in result["holonym"]["hypothesis"]:
+                    result["holonym"]["hypothesis"].append(h_idx)
+
+    return result
+
+
+def store_auto_spans(conn, example_id: str, auto_labels: dict, tier: int = 0):
+    """Store computed auto-spans in the database."""
+    for label_name, sources in auto_labels.items():
+        for source, indices in sources.items():
+            if indices:  # Only store non-empty spans
+                conn.execute("""
+                    INSERT OR REPLACE INTO auto_spans (example_id, tier, label_name, source, word_indices)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (example_id, tier, label_name, source, json.dumps(indices)))
+
+
+def get_auto_spans(conn, example_id: str) -> dict:
+    """Retrieve computed auto-spans for an example."""
+    rows = conn.execute("""
+        SELECT tier, label_name, source, word_indices
+        FROM auto_spans
+        WHERE example_id = ?
+    """, (example_id,)).fetchall()
+
+    result = {"tier0": {}, "tier1": {}}
+    for row in rows:
+        tier_key = f"tier{row['tier']}"
+        label = row["label_name"]
+        source = row["source"]
+        indices = json.loads(row["word_indices"])
+
+        if label not in result[tier_key]:
+            result[tier_key][label] = {"premise": [], "hypothesis": []}
+        result[tier_key][label][source] = indices
+
+    return result
+
+
+def ensure_auto_spans_computed(conn, example_id: str, premise: str, hypothesis: str) -> dict:
+    """Ensure auto-spans are computed for an example, computing if needed."""
+    # Check if already computed (check both tiers)
+    existing_tier0 = conn.execute(
+        "SELECT example_id FROM auto_spans WHERE example_id = ? AND tier = 0 LIMIT 1",
+        (example_id,)
+    ).fetchone()
+    existing_tier1 = conn.execute(
+        "SELECT example_id FROM auto_spans WHERE example_id = ? AND tier = 1 LIMIT 1",
+        (example_id,)
+    ).fetchone()
+
+    # Tokenize once for both tiers
+    premise_tokens = tokenize_text(premise)
+    hypothesis_tokens = tokenize_text(hypothesis)
+
+    # Compute Tier 0 if not cached
+    if not existing_tier0:
+        tier0_labels = compute_tier0_labels(premise, hypothesis, premise_tokens, hypothesis_tokens)
+        store_auto_spans(conn, example_id, tier0_labels, tier=0)
+
+    # Compute Tier 1 if not cached (WordNet semantic relations)
+    if not existing_tier1:
+        tier1_labels = compute_tier1_labels(premise, hypothesis, premise_tokens, hypothesis_tokens)
+        store_auto_spans(conn, example_id, tier1_labels, tier=1)
+
+    if not existing_tier0 or not existing_tier1:
+        conn.commit()
+
+    return get_auto_spans(conn, example_id)
 
 
 # ============================================================================
@@ -626,6 +998,37 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_training_user ON training_submissions(user_id);
         """)
 
+        # Create auto_spans table for tiered annotation system (Tier 0 + Tier 1)
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS auto_spans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                example_id TEXT NOT NULL,
+                tier INTEGER NOT NULL,
+                label_name TEXT NOT NULL,
+                source TEXT NOT NULL,
+                word_indices TEXT NOT NULL,
+                computed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (example_id) REFERENCES examples(id) ON DELETE CASCADE,
+                UNIQUE(example_id, label_name, source)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_auto_spans_example ON auto_spans(example_id);
+            CREATE INDEX IF NOT EXISTS idx_auto_spans_tier ON auto_spans(tier);
+
+            CREATE TABLE IF NOT EXISTS tier1_quality (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                example_id TEXT NOT NULL,
+                label_name TEXT NOT NULL,
+                verified_by INTEGER,
+                is_correct BOOLEAN,
+                verified_at TIMESTAMP,
+                FOREIGN KEY (example_id) REFERENCES examples(id) ON DELETE CASCADE,
+                FOREIGN KEY (verified_by) REFERENCES users(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_tier1_quality_label ON tier1_quality(label_name);
+        """)
+
         # Add training columns to users table if needed
         if needs_training_migration:
             migrate_add_training_columns(conn)
@@ -891,9 +1294,9 @@ def calculate_complexity_agreement(scores: list[dict]) -> float:
         mean_val = sum(values) / len(values)
         mad = sum(abs(v - mean_val) for v in values) / len(values)
         
-        # Normalize to 0-1 scale (max deviation is 50 on a 1-100 scale)
-        # Agreement = 1 - (MAD / 50)
-        dimension_agreement = max(0, 1 - (mad / 50))
+        # Normalize to 0-1 scale (max deviation is 5 on a 0-10 scale)
+        # Agreement = 1 - (MAD / 5)
+        dimension_agreement = max(0, 1 - (mad / 5))
         total_agreement += dimension_agreement
         valid_dimensions += 1
     
@@ -1508,19 +1911,34 @@ async def get_current_user(request: Request) -> dict:
             "role": ROLE_ANNOTATOR,
             "is_anonymous": True
         }
-    
+
     token = request.cookies.get("session")
     user = get_user_from_session(token)
-    
+
     if not user:
+        # If anonymous submissions allowed, return anonymous user
+        if ALLOW_ANONYMOUS_SUBMISSIONS:
+            return {
+                "id": ANONYMOUS_USER_ID,
+                "username": "anonymous",
+                "display_name": "Anonymous User",
+                "role": ROLE_ANNOTATOR,
+                "is_anonymous": True
+            }
         raise HTTPException(401, "Not authenticated. Please log in.")
-    
+
     return user
 
 
 async def get_optional_user(request: Request) -> Optional[dict]:
     """Dependency to get current user, or None if not authenticated."""
-    if ANONYMOUS_MODE:
+    if ANONYMOUS_MODE or ALLOW_ANONYMOUS_SUBMISSIONS:
+        # Check for logged-in user first
+        token = request.cookies.get("session")
+        user = get_user_from_session(token)
+        if user:
+            return user
+        # Fall back to anonymous
         return {
             "id": ANONYMOUS_USER_ID,
             "username": "anonymous",
@@ -1585,6 +2003,7 @@ class ExampleResponse(BaseModel):
     existing_scores: Optional[dict] = Field(None, description="Previously saved complexity scores (by current user)")
     lock_until: Optional[str] = Field(None, description="ISO timestamp when the lock on this example expires")
     pool_status: Optional[str] = Field(None, description="Question pool status: test, building, or zero_entry")
+    auto_spans: Optional[dict] = Field(None, description="Auto-computed spans (Tier 0/1) for read-only display")
 
 
 class UserCreate(BaseModel):
@@ -1919,9 +2338,84 @@ async def auth_status():
     """Get authentication status and mode."""
     return {
         "anonymous_mode": ANONYMOUS_MODE,
+        "allow_anonymous_submissions": ALLOW_ANONYMOUS_SUBMISSIONS,
         "registration_enabled": not ANONYMOUS_MODE,
         "admin_bootstrap_configured": bool(ADMIN_USER)
     }
+
+
+# ============================================================================
+# API Endpoints - Auto Spans (Tiered Annotation)
+# ============================================================================
+
+@app.get(
+    "/api/auto-spans/{example_id}",
+    tags=["Auto Labels"],
+    summary="Get auto-computed spans for an example",
+    description="Retrieve Tier 0 (automatic) and Tier 1 (weak supervision) labels for an example.",
+)
+async def get_example_auto_spans(
+    example_id: str,
+    user: dict = Depends(get_current_user)
+):
+    """Get auto-computed spans for an example."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT premise, hypothesis FROM examples WHERE id = ?",
+            (example_id,)
+        ).fetchone()
+
+        if not row:
+            raise HTTPException(404, f"Example not found: {example_id}")
+
+        auto_spans = ensure_auto_spans_computed(conn, example_id, row["premise"], row["hypothesis"])
+        return {"example_id": example_id, "auto_spans": auto_spans}
+
+
+@app.post(
+    "/api/admin/compute-auto-spans",
+    tags=["Admin"],
+    summary="Batch compute auto-spans (admin)",
+    description="Compute Tier 0 auto-spans for all examples or a specific dataset. Admin only.",
+)
+async def admin_compute_auto_spans(
+    dataset: str = Query(None, description="Filter by dataset (compute all if not specified)"),
+    limit: int = Query(1000, description="Maximum examples to process"),
+    admin: dict = Depends(require_admin)
+):
+    """Batch compute Tier 0 auto-spans for examples."""
+    with get_db() as conn:
+        # Find examples without auto-spans
+        query = """
+            SELECT e.id, e.premise, e.hypothesis
+            FROM examples e
+            WHERE e.id NOT IN (SELECT DISTINCT example_id FROM auto_spans)
+        """
+        params = []
+
+        if dataset:
+            query += " AND e.dataset = ?"
+            params.append(dataset)
+
+        query += f" LIMIT {limit}"
+
+        rows = conn.execute(query, params).fetchall()
+        computed = 0
+
+        for row in rows:
+            premise_tokens = tokenize_text(row["premise"])
+            hypothesis_tokens = tokenize_text(row["hypothesis"])
+            auto_labels = compute_tier0_labels(row["premise"], row["hypothesis"], premise_tokens, hypothesis_tokens)
+            store_auto_spans(conn, row["id"], auto_labels, tier=0)
+            computed += 1
+
+        conn.commit()
+
+        return {
+            "computed": computed,
+            "dataset": dataset,
+            "message": f"Computed Tier 0 auto-spans for {computed} examples"
+        }
 
 
 # ============================================================================
@@ -3984,6 +4478,9 @@ async def get_next_example(
         premise_words = tokenize_text(row["premise"])
         hypothesis_words = tokenize_text(row["hypothesis"])
 
+        # Compute/retrieve auto-spans (Tier 0 labels)
+        auto_spans = ensure_auto_spans_computed(conn, row["id"], row["premise"], row["hypothesis"])
+
         return ExampleResponse(
             id=row["id"],
             dataset=row["dataset"],
@@ -3996,7 +4493,8 @@ async def get_next_example(
             existing_labels=existing_labels,
             existing_scores=existing_scores,
             lock_until=lock_until.isoformat() if lock_until else None,
-            pool_status=row["pool_status"]
+            pool_status=row["pool_status"],
+            auto_spans=auto_spans
         )
 
 
@@ -4069,7 +4567,10 @@ async def get_example(
         # Tokenize the texts
         premise_words = tokenize_text(row["premise"])
         hypothesis_words = tokenize_text(row["hypothesis"])
-        
+
+        # Compute/retrieve auto-spans (Tier 0 labels)
+        auto_spans = ensure_auto_spans_computed(conn, row["id"], row["premise"], row["hypothesis"])
+
         return ExampleResponse(
             id=row["id"],
             dataset=row["dataset"],
@@ -4082,7 +4583,8 @@ async def get_example(
             existing_labels=existing_labels,
             existing_scores=existing_scores,
             lock_until=lock_until,
-            pool_status=row["pool_status"]
+            pool_status=row["pool_status"],
+            auto_spans=auto_spans
         )
 
 

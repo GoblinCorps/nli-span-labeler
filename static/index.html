@@ -136,13 +136,24 @@
         .word-container {
             display: inline-block;
             position: relative;
-            margin: 2px 4px;
+            margin: 2px 0;
             vertical-align: top;
         }
 
-        /* Subword tokens have reduced left margin to visually connect */
-        .word-container.subword {
+        /* Word-initial tokens (not subwords) get left margin to separate from previous word */
+        .word-container:not(.subword) {
+            margin-left: 6px;
+        }
+
+        /* First token in a text block doesn't need left margin */
+        .words:first-child .word-container:first-child,
+        .word-container:first-child {
             margin-left: 0;
+        }
+
+        /* Subword tokens connect tightly to previous token */
+        .word-container.subword {
+            margin-left: 1px;
         }
 
         .word {
@@ -225,6 +236,138 @@
         .color-6 { background: rgba(74, 222, 128, 0.3); border-color: #4ade80; color: #4ade80; }
         .color-7 { background: rgba(251, 191, 36, 0.3); border-color: #fbbf24; color: #fbbf24; }
         .color-8 { background: rgba(248, 113, 113, 0.3); border-color: #f87171; color: #f87171; }
+
+        /* Auto-spans display (read-only Tier 0/1 labels) */
+        .auto-spans-section {
+            margin-top: 15px;
+            padding: 12px;
+            background: rgba(0, 0, 0, 0.15);
+            border-radius: 8px;
+            border-left: 3px solid var(--text-secondary);
+        }
+
+        .auto-spans-header {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .auto-spans-header::before {
+            content: '🤖';
+            font-size: 1rem;
+        }
+
+        .auto-spans-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .auto-span-tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            background: rgba(100, 100, 100, 0.3);
+            border-radius: 12px;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            opacity: 0.8;
+        }
+
+        .auto-span-tag .label-name {
+            font-weight: 500;
+        }
+
+        .auto-span-tag .token-list {
+            color: #aaa;
+            max-width: 200px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .auto-span-tag.tier0 {
+            border: 1px solid rgba(100, 100, 100, 0.5);
+        }
+
+        .auto-span-tag.tier1 {
+            border: 1px solid rgba(139, 92, 246, 0.5);
+            background: rgba(139, 92, 246, 0.15);
+        }
+
+        .auto-spans-empty {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            font-style: italic;
+        }
+
+        /* Difficulty Justification Section (conditional spans) */
+        .difficulty-justifications-section {
+            margin-top: 15px;
+            border-left: 3px solid var(--accent);
+        }
+
+        .difficulty-justification-grid {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .difficulty-justification-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 12px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
+            cursor: pointer;
+            border: 2px solid transparent;
+            transition: all 0.2s;
+        }
+
+        .difficulty-justification-item:hover {
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .difficulty-justification-item.active {
+            border-color: var(--accent);
+            background: rgba(74, 158, 255, 0.15);
+        }
+
+        .justification-color {
+            width: 16px;
+            height: 16px;
+            border-radius: 4px;
+            flex-shrink: 0;
+        }
+
+        .justification-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .justification-name {
+            font-weight: 500;
+            font-size: 0.9rem;
+        }
+
+        .justification-prompt {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            margin-top: 2px;
+        }
+
+        .justification-count {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
 
         .labels-section { margin-top: 20px; }
 
@@ -1385,8 +1528,9 @@
 </head>
 <body>
     <!-- Auth Modal -->
-    <div id="auth-modal" class="modal-overlay hidden">
+    <div id="auth-modal" class="modal-overlay hidden" onclick="handleAuthOverlayClick(event)">
         <div class="modal">
+            <button id="auth-modal-close" class="modal-close hidden" onclick="dismissAuthModal()">&times;</button>
             <h2>NLI Span Labeler</h2>
             <div class="modal-tabs">
                 <button class="modal-tab active" onclick="switchAuthTab('login')">Login</button>
@@ -1431,6 +1575,11 @@
 
             <div id="anonymous-note" class="anonymous-note hidden">
                 Running in anonymous mode. No login required.
+            </div>
+
+            <div id="dismiss-note" class="anonymous-note hidden">
+                <p style="margin-bottom: 8px;">Anonymous submissions are enabled.</p>
+                <button type="button" class="btn btn-secondary" onclick="dismissAuthModal()">Continue as Anonymous</button>
             </div>
         </div>
     </div>
@@ -1550,7 +1699,7 @@
 
                     <h3>Complexity Scores</h3>
                     <p>
-                        Rate each example on a scale of <strong>1-100</strong> for six dimensions:
+                        Rate each example on a scale of <strong>0-10</strong> for six dimensions:
                     </p>
                     <ul>
                         <li><strong>Reasoning</strong> - How much logical inference is required?</li>
@@ -1751,7 +1900,7 @@
 
                 <!-- Training Complexity Scores -->
                 <div class="card complexity-section">
-                    <h3 style="margin-bottom: 15px;">Complexity Scores (1-100)</h3>
+                    <h3 style="margin-bottom: 15px;">Complexity Scores (0-10)</h3>
                     <div class="complexity-grid" id="training-complexity-grid"></div>
                 </div>
 
@@ -1826,8 +1975,17 @@
 
             <!-- Complexity Scores Section -->
             <div class="card complexity-section">
-                <h3 style="margin-bottom: 15px;">Complexity Scores (1-100)</h3>
+                <h3 style="margin-bottom: 15px;">Complexity Scores (0-10)</h3>
                 <div class="complexity-grid" id="complexity-grid"></div>
+            </div>
+
+            <!-- Difficulty Justification Spans (shown when any complexity > 5) -->
+            <div id="difficulty-justifications" class="card difficulty-justifications-section hidden">
+                <h3 style="margin-bottom: 10px;">📍 Justify High Scores</h3>
+                <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 15px;">
+                    For dimensions rated &gt;5, click to select, then mark tokens that justify that rating.
+                </p>
+                <div id="difficulty-justification-list" class="difficulty-justification-grid"></div>
             </div>
 
             <!-- Actions -->
@@ -2184,12 +2342,15 @@
         // Authentication
         // ============================================================================
 
+        let allowAnonymousSubmissions = false;
+
         async function checkAuthStatus() {
             try {
                 // First check if we're in anonymous mode
                 const statusResp = await fetch('/api/auth/status');
                 const status = await statusResp.json();
                 isAnonymousMode = status.anonymous_mode;
+                allowAnonymousSubmissions = status.allow_anonymous_submissions;
 
                 if (isAnonymousMode) {
                     // Anonymous mode - no login needed
@@ -2226,10 +2387,33 @@
             if (isAnonymousMode) {
                 document.getElementById('anonymous-note').classList.remove('hidden');
             }
+            // Show dismiss option if anonymous submissions allowed
+            if (allowAnonymousSubmissions && !isAnonymousMode) {
+                document.getElementById('dismiss-note').classList.remove('hidden');
+                document.getElementById('auth-modal-close').classList.remove('hidden');
+            }
         }
 
         function hideAuthModal() {
             document.getElementById('auth-modal').classList.add('hidden');
+        }
+
+        function handleAuthOverlayClick(event) {
+            // Only dismiss if clicking the overlay itself (not the modal content)
+            // and anonymous submissions are allowed
+            if (event.target.id === 'auth-modal' && allowAnonymousSubmissions) {
+                dismissAuthModal();
+            }
+        }
+
+        function dismissAuthModal() {
+            if (allowAnonymousSubmissions || isAnonymousMode) {
+                currentUser = { username: 'anonymous', display_name: 'Anonymous', is_anonymous: true };
+                hideAuthModal();
+                updateUserDisplay();
+                // Load initial data
+                loadNextExample();
+            }
         }
 
         function switchAuthTab(tab) {
@@ -2694,10 +2878,10 @@
                     <div class="complexity-label">${dim.label}</div>
                     <div class="complexity-input">
                         <input type="range" id="complexity-range-${dim.key}"
-                               min="1" max="100" value="50"
+                               min="0" max="10" value="0"
                                oninput="syncComplexity('${dim.key}', this.value, 'range')">
                         <input type="number" id="complexity-num-${dim.key}"
-                               min="1" max="100" value="50"
+                               min="0" max="10" value="0"
                                oninput="syncComplexity('${dim.key}', this.value, 'num')">
                     </div>
                 </div>
@@ -2706,7 +2890,7 @@
 
         function syncComplexity(key, value, source) {
             // Clamp value to valid range
-            value = Math.max(1, Math.min(100, parseInt(value) || 50));
+            value = Math.max(0, Math.min(10, parseInt(value) || 0));
 
             const rangeInput = document.getElementById(`complexity-range-${key}`);
             const numInput = document.getElementById(`complexity-num-${key}`);
@@ -2716,6 +2900,113 @@
             } else {
                 rangeInput.value = value;
             }
+
+            // Show/hide justification span prompt when value > 5
+            updateDifficultyJustification(key, value);
+        }
+
+        // ============================================================================
+        // Conditional Difficulty Span Justifications
+        // ============================================================================
+
+        const DIFFICULTY_THRESHOLD = 5;  // Show justification prompt when slider > this value
+        const difficultyJustifications = new Map();  // key -> { active: bool, spans: { premise: Set, hypothesis: Set } }
+
+        const difficultyLabels = {
+            reasoning: { color: '#3b82f6', prompt: 'Mark tokens requiring logical inference' },
+            creativity: { color: '#8b5cf6', prompt: 'Mark tokens needing imaginative interpretation' },
+            domain_knowledge: { color: '#06b6d4', prompt: 'Mark tokens requiring specialized knowledge' },
+            contextual: { color: '#22c55e', prompt: 'Mark tokens depending on implicit context' },
+            constraints: { color: '#eab308', prompt: 'Mark tokens representing conditions to track' },
+            ambiguity: { color: '#f97316', prompt: 'Mark tokens that are ambiguous or debatable' }
+        };
+
+        function updateDifficultyJustification(key, value) {
+            const container = document.getElementById('difficulty-justifications');
+            if (!container) return;
+
+            if (value > DIFFICULTY_THRESHOLD) {
+                // Show justification prompt
+                if (!difficultyJustifications.has(key)) {
+                    difficultyJustifications.set(key, {
+                        active: false,
+                        spans: { premise: new Set(), hypothesis: new Set() }
+                    });
+                }
+                renderDifficultyJustifications();
+            } else {
+                // Hide justification prompt
+                difficultyJustifications.delete(key);
+                renderDifficultyJustifications();
+            }
+        }
+
+        function renderDifficultyJustifications() {
+            const container = document.getElementById('difficulty-justifications');
+            if (!container) return;
+
+            if (difficultyJustifications.size === 0) {
+                container.classList.add('hidden');
+                return;
+            }
+
+            container.classList.remove('hidden');
+            const list = document.getElementById('difficulty-justification-list');
+
+            list.innerHTML = Array.from(difficultyJustifications.entries()).map(([key, data]) => {
+                const label = difficultyLabels[key];
+                const displayName = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                const spanCount = data.spans.premise.size + data.spans.hypothesis.size;
+
+                return `
+                    <div class="difficulty-justification-item ${data.active ? 'active' : ''}"
+                         onclick="selectDifficultyJustification('${key}')"
+                         data-key="${key}">
+                        <div class="justification-color" style="background: ${label.color}"></div>
+                        <div class="justification-info">
+                            <div class="justification-name">${displayName}</div>
+                            <div class="justification-prompt">${label.prompt}</div>
+                        </div>
+                        <div class="justification-count">${spanCount}</div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function selectDifficultyJustification(key) {
+            // Deactivate all other justifications and regular labels
+            difficultyJustifications.forEach((data, k) => {
+                data.active = (k === key) ? !data.active : false;
+            });
+            activeLabel = null;  // Deselect regular labels
+            renderLabels();
+            renderDifficultyJustifications();
+            updateWordHighlights();
+        }
+
+        function getActiveDifficultyJustification() {
+            for (const [key, data] of difficultyJustifications) {
+                if (data.active) return key;
+            }
+            return null;
+        }
+
+        function toggleDifficultyJustificationWord(source, index) {
+            const activeKey = getActiveDifficultyJustification();
+            if (!activeKey) return false;
+
+            const data = difficultyJustifications.get(activeKey);
+            if (!data) return false;
+
+            if (data.spans[source].has(index)) {
+                data.spans[source].delete(index);
+            } else {
+                data.spans[source].add(index);
+            }
+
+            renderDifficultyJustifications();
+            updateWordHighlights();
+            return true;
         }
 
         // ============================================================================
@@ -2757,6 +3048,11 @@
 
         function selectLabel(idx) {
             activeLabel = activeLabel === idx ? null : idx;
+            // Deselect any active difficulty justification when selecting a regular label
+            difficultyJustifications.forEach((data, key) => {
+                data.active = false;
+            });
+            renderDifficultyJustifications();
             renderLabels();
             updateWordHighlights();
         }
@@ -2826,13 +3122,17 @@
             activeLabel = null;
             renderLabels();
 
-            // Reset complexity scores to 50
+            // Reset complexity scores to 0 (default on 0-10 scale)
             complexityDimensions.forEach(dim => {
                 const rangeInput = document.getElementById(`complexity-range-${dim.key}`);
                 const numInput = document.getElementById(`complexity-num-${dim.key}`);
-                if (rangeInput) rangeInput.value = 50;
-                if (numInput) numInput.value = 50;
+                if (rangeInput) rangeInput.value = 0;
+                if (numInput) numInput.value = 0;
             });
+
+            // Clear difficulty justifications
+            difficultyJustifications.clear();
+            renderDifficultyJustifications();
         }
 
         function renderExample() {
@@ -2858,7 +3158,16 @@
                         ${renderWords(currentExample.hypothesis_words, 'hypothesis')}
                     </div>
                 </div>
+                <div class="auto-spans-section" id="auto-spans-container">
+                    <div class="auto-spans-header">Auto-detected patterns</div>
+                    <div id="auto-spans-content" class="auto-spans-list">
+                        <span class="auto-spans-empty">Loading...</span>
+                    </div>
+                </div>
             `;
+
+            // Load auto-spans for this example
+            loadAutoSpans(currentExample.id);
 
             // Load existing labels if any
             if (currentExample.existing_labels && currentExample.existing_labels.length > 0) {
@@ -2903,6 +3212,124 @@
             }).join('');
         }
 
+        // ============================================================================
+        // Auto-spans Display (Tier 0/1 read-only labels)
+        // ============================================================================
+
+        async function loadAutoSpans(exampleId) {
+            const container = document.getElementById('auto-spans-content');
+            if (!container) return;
+
+            try {
+                const resp = await authenticatedFetch(`/api/auto-spans/${exampleId}`);
+                if (!resp.ok) {
+                    container.innerHTML = '<span class="auto-spans-empty">Unable to load auto-spans</span>';
+                    return;
+                }
+
+                const data = await resp.json();
+                renderAutoSpans(data.auto_spans);
+            } catch (e) {
+                console.error('Failed to load auto-spans:', e);
+                container.innerHTML = '<span class="auto-spans-empty">Error loading auto-spans</span>';
+            }
+        }
+
+        function renderAutoSpans(autoSpans) {
+            const container = document.getElementById('auto-spans-content');
+            if (!container || !autoSpans) return;
+
+            const tags = [];
+
+            // Human-readable label names
+            const labelNames = {
+                'aligned_tokens': 'Aligned',
+                'premise_only': 'Premise only',
+                'hypothesis_only': 'Hypothesis only',
+                'negation': 'Negation',
+                'quantifier': 'Quantifier',
+                'modal': 'Modal',
+                'conditional': 'Conditional',
+                'temporal': 'Temporal',
+                'causal': 'Causal',
+                'hypernym': 'Hypernym',
+                'hyponym': 'Hyponym',
+                'synonym': 'Synonym',
+                'antonym': 'Antonym'
+            };
+
+            // Process Tier 0 labels
+            if (autoSpans.tier0) {
+                Object.entries(autoSpans.tier0).forEach(([label, sources]) => {
+                    const premiseIndices = sources.premise || [];
+                    const hypothesisIndices = sources.hypothesis || [];
+                    const allIndices = [...premiseIndices, ...hypothesisIndices];
+
+                    if (allIndices.length > 0) {
+                        const displayName = labelNames[label] || label.replace(/_/g, ' ');
+                        const tokenText = getTokenText(premiseIndices, hypothesisIndices);
+                        tags.push(`
+                            <span class="auto-span-tag tier0" title="${label}: ${tokenText}">
+                                <span class="label-name">${displayName}</span>
+                                <span class="token-list">${tokenText}</span>
+                            </span>
+                        `);
+                    }
+                });
+            }
+
+            // Process Tier 1 labels (WordNet-based, future)
+            if (autoSpans.tier1) {
+                Object.entries(autoSpans.tier1).forEach(([label, sources]) => {
+                    const premiseIndices = sources.premise || [];
+                    const hypothesisIndices = sources.hypothesis || [];
+                    const allIndices = [...premiseIndices, ...hypothesisIndices];
+
+                    if (allIndices.length > 0) {
+                        const displayName = labelNames[label] || label.replace(/_/g, ' ');
+                        const tokenText = getTokenText(premiseIndices, hypothesisIndices);
+                        tags.push(`
+                            <span class="auto-span-tag tier1" title="${label}: ${tokenText}">
+                                <span class="label-name">${displayName}</span>
+                                <span class="token-list">${tokenText}</span>
+                            </span>
+                        `);
+                    }
+                });
+            }
+
+            if (tags.length === 0) {
+                container.innerHTML = '<span class="auto-spans-empty">No patterns detected</span>';
+            } else {
+                container.innerHTML = tags.join('');
+            }
+        }
+
+        function getTokenText(premiseIndices, hypothesisIndices) {
+            const parts = [];
+            if (premiseIndices.length > 0 && currentExample) {
+                const tokens = premiseIndices
+                    .map(i => currentExample.premise_words[i]?.text || '')
+                    .filter(t => t)
+                    .map(t => t.replace(/Ġ|▁/g, '').trim())
+                    .filter(t => t);
+                if (tokens.length > 0) {
+                    parts.push(`P: ${tokens.slice(0, 3).join(', ')}${tokens.length > 3 ? '...' : ''}`);
+                }
+            }
+            if (hypothesisIndices.length > 0 && currentExample) {
+                const tokens = hypothesisIndices
+                    .map(i => currentExample.hypothesis_words[i]?.text || '')
+                    .filter(t => t)
+                    .map(t => t.replace(/Ġ|▁/g, '').trim())
+                    .filter(t => t);
+                if (tokens.length > 0) {
+                    parts.push(`H: ${tokens.slice(0, 3).join(', ')}${tokens.length > 3 ? '...' : ''}`);
+                }
+            }
+            return parts.join(' | ') || 'tokens';
+        }
+
         function handleWordClick(source, index) {
             // Update keyboard focus to clicked word
             focusedSource = source;
@@ -2939,6 +3366,11 @@
         }
 
         function toggleWord(source, index) {
+            // Check for active difficulty justification first
+            if (toggleDifficultyJustificationWord(source, index)) {
+                return;  // Handled by difficulty justification
+            }
+
             if (activeLabel === null) {
                 showMessage('Select a label first (click or press 1-9)', 'error');
                 return;
@@ -3022,6 +3454,45 @@
                     }
                 });
             });
+
+            // Also highlight difficulty justification spans
+            const activeJustification = getActiveDifficultyJustification();
+            difficultyJustifications.forEach((data, key) => {
+                const color = difficultyLabels[key].color;
+                ['premise', 'hypothesis'].forEach(source => {
+                    data.spans[source].forEach(wordIdx => {
+                        const wordEl = document.querySelector(
+                            `.word[data-source="${source}"][data-index="${wordIdx}"]`
+                        );
+                        const dotsEl = document.querySelector(
+                            `.label-dots[data-source="${source}"][data-index="${wordIdx}"]`
+                        );
+
+                        if (wordEl) {
+                            // Add visual indicator for difficulty justification
+                            if (key === activeJustification) {
+                                wordEl.style.borderColor = color;
+                                wordEl.style.borderWidth = '2px';
+                                wordEl.style.borderStyle = 'dashed';
+                                wordEl.style.background = `${color}20`;  // 20 = 12% opacity in hex
+                            }
+                        }
+
+                        if (dotsEl) {
+                            // Add a square marker (not dot) to distinguish from regular labels
+                            const marker = document.createElement('div');
+                            marker.className = 'label-dot';
+                            marker.style.background = color;
+                            marker.style.borderRadius = '2px';  // Square-ish
+                            marker.title = `${key.replace(/_/g, ' ')} justification`;
+                            if (key === activeJustification) {
+                                marker.classList.add('active-label');
+                            }
+                            dotsEl.appendChild(marker);
+                        }
+                    });
+                });
+            });
         }
 
         function clearSelections() {
@@ -3029,6 +3500,9 @@
                 label.spans = { premise: new Set(), hypothesis: new Set() };
             });
             activeLabel = null;
+            // Also clear difficulty justifications
+            difficultyJustifications.clear();
+            renderDifficultyJustifications();
             renderLabels();
             updateWordHighlights();
             showMessage('Cleared all selections', 'success');
@@ -3074,7 +3548,38 @@
             complexityDimensions.forEach(dim => {
                 const numInput = document.getElementById(`complexity-num-${dim.key}`);
                 if (numInput) {
-                    complexityScores[dim.key] = parseInt(numInput.value) || 50;
+                    complexityScores[dim.key] = parseInt(numInput.value) || 0;
+                }
+            });
+
+            // Build difficulty justification spans
+            const difficultyJustificationData = {};
+            difficultyJustifications.forEach((data, key) => {
+                if (data.spans.premise.size > 0 || data.spans.hypothesis.size > 0) {
+                    difficultyJustificationData[key] = {
+                        spans: [
+                            ...Array.from(data.spans.premise).map(idx => {
+                                const wordData = currentExample.premise_words[idx];
+                                return {
+                                    source: 'premise',
+                                    word_index: idx,
+                                    word_text: wordData.text,
+                                    char_start: wordData.char_start,
+                                    char_end: wordData.char_end
+                                };
+                            }),
+                            ...Array.from(data.spans.hypothesis).map(idx => {
+                                const wordData = currentExample.hypothesis_words[idx];
+                                return {
+                                    source: 'hypothesis',
+                                    word_index: idx,
+                                    word_text: wordData.text,
+                                    char_start: wordData.char_start,
+                                    char_end: wordData.char_end
+                                };
+                            })
+                        ]
+                    };
                 }
             });
 
@@ -3085,7 +3590,8 @@
                     body: JSON.stringify({
                         example_id: currentExample.id,
                         labels: labelData,
-                        complexity_scores: complexityScores
+                        complexity_scores: complexityScores,
+                        difficulty_justifications: difficultyJustificationData
                     })
                 });
 
@@ -3218,11 +3724,14 @@
                 // Render personal stats card
                 renderPersonalStats(stats);
 
+                // Compute total labeled from per-dataset counts
+                const totalLabeled = Object.values(stats.labeled).reduce((sum, n) => sum + n, 0);
+
                 // Render general stats
                 let html = `
                     <div class="stat-card">
                         <div class="stat-label">Total Labeled</div>
-                        <div class="stat-value">${stats.total_labeled}</div>
+                        <div class="stat-value">${totalLabeled}</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">Total Spans</div>
@@ -4213,12 +4722,12 @@
 
         function initTrainingComplexityScores() {
             trainingComplexityScores = {
-                reasoning: 50,
-                creativity: 50,
-                domain_knowledge: 50,
-                contextual: 50,
-                constraints: 50,
-                ambiguity: 50
+                reasoning: 0,
+                creativity: 0,
+                domain_knowledge: 0,
+                contextual: 0,
+                constraints: 0,
+                ambiguity: 0
             };
 
             const grid = document.getElementById('training-complexity-grid');
@@ -4234,9 +4743,9 @@
             grid.innerHTML = dimensions.map(d => `
                 <div class="complexity-item">
                     <label title="${d.desc}">${d.label}</label>
-                    <input type="range" min="1" max="100" value="50"
+                    <input type="range" min="0" max="10" value="0"
                            oninput="updateTrainingScore('${d.key}', this.value)">
-                    <span class="score-value" id="training-score-${d.key}">50</span>
+                    <span class="score-value" id="training-score-${d.key}">0</span>
                 </div>
             `).join('');
         }
