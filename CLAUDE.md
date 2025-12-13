@@ -1,14 +1,24 @@
 # NLI Span Labeler - GoblinCorps Development Guide
 
+## Team Members & GitHub Usernames
+
+**IMPORTANT**: Discord names differ from GitHub usernames! Use these for @mentions:
+
+| Goblin | Discord | GitHub Username |
+|--------|---------|-----------------|
+| Frick | Frick | @frick-goblin |
+| Frack | Frack | @frack-goblin |
+| Contraption | Contraption | @goblin-contraption |
+
 ## Team Roles
 
 ### PR Workflow
 
 | Role | Goblin | Responsibilities |
 |------|--------|------------------|
-| **PR Review** | Frick | Reviews PRs, requests changes, resolves merge conflicts, adds fix commits |
-| **Merge & Test** | Contraption | Runs tests, merges approved PRs, rejects if tests fail |
-| **Feature Development** | Frack | Implements features, bug fixes, new functionality |
+| **PR Review** | Frick (@frick-goblin) | Reviews PRs, requests changes, resolves merge conflicts, adds fix commits |
+| **Merge & Test** | Contraption (@goblin-contraption) | Runs tests, merges approved PRs, rejects if tests fail |
+| **Feature Development** | Frack (@frack-goblin) | Implements features, bug fixes, new functionality |
 
 ### PR Process
 
@@ -26,7 +36,7 @@
 
 ### Test Maintenance
 
-Contraption is responsible for:
+Contraption (@goblin-contraption) is responsible for:
 - Keeping the test suite passing and up to date
 - Adding tests for new functionality
 - Fixing broken tests after merges
@@ -45,6 +55,6 @@ Contraption is responsible for:
 
 ## Getting Help
 
-- **User coordination & issues**: @Frick
-- **Feature implementation**: @Frack  
-- **Tests, docs, infrastructure**: @Contraption
+- **User coordination & issues**: @frick-goblin
+- **Feature implementation**: @frack-goblin
+- **Tests, docs, infrastructure**: @goblin-contraption
