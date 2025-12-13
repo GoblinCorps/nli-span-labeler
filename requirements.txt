@@ -2,5 +2,12 @@ fastapi>=0.100.0
 uvicorn>=0.20.0
 pydantic>=2.0.0
 
+# Tokenization - use the actual target model tokenizer
+transformers>=4.36.0
+
 # Optional: for downloading datasets
 datasets>=2.14.0
+
+# Testing
+pytest>=7.0.0
+httpx>=0.24.0  # Required by FastAPI TestClient
