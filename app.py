@@ -36,6 +36,14 @@ Environment Variables:
     CALIBRATION_TEST_RATIO_NEW=0.8  - Test question ratio for new/provisional users (default: 0.8)
     CALIBRATION_TEST_RATIO_ESTABLISHED=0.1  - Test question ratio for calibrated users (default: 0.1)
     CONTROVERSIAL_THRESHOLD=0.5  - Auto-flag examples with agreement below this (default: 0.5)
+
+Rate Limiting:
+    RATE_LIMIT_ENABLED=1  - Enable/disable rate limiting (default: enabled)
+    RATE_LIMIT_AUTH=5/minute  - Limit for auth endpoints (login, register)
+    RATE_LIMIT_ANNOTATION=30/minute  - Limit for annotation endpoints (next, label, skip)
+    RATE_LIMIT_DEFAULT=60/minute  - Limit for all other endpoints
+
+CORS & Logging:
     CORS_ORIGINS=https://example.com  - Comma-separated allowed origins (default: same-origin only)
     CORS_ALLOW_CREDENTIALS=1  - Allow credentials in CORS requests (default: 1)
     REQUEST_LOG_LEVEL=INFO  - Logging level for request logs (default: INFO)
@@ -59,6 +67,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import time
 import logging
 
@@ -121,9 +132,46 @@ CALIBRATION_ROUTING_ENABLED = os.environ.get("CALIBRATION_ROUTING_ENABLED", "1")
 CALIBRATION_TEST_RATIO_NEW = float(os.environ.get("CALIBRATION_TEST_RATIO_NEW", "0.8"))  # 80% test questions for new users
 CALIBRATION_TEST_RATIO_ESTABLISHED = float(os.environ.get("CALIBRATION_TEST_RATIO_ESTABLISHED", "0.1"))  # 10% for drift detection
 
+# Rate limiting configuration
+RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "1") == "1"
+RATE_LIMIT_AUTH = os.environ.get("RATE_LIMIT_AUTH", "5/minute")  # Auth endpoints
+RATE_LIMIT_ANNOTATION = os.environ.get("RATE_LIMIT_ANNOTATION", "30/minute")  # Annotation endpoints
+RATE_LIMIT_DEFAULT = os.environ.get("RATE_LIMIT_DEFAULT", "60/minute")  # Everything else
+
 # Training configuration
 TRAINING_ENABLED = os.environ.get("TRAINING_ENABLED", "1") == "1"
 TRAINING_MIN_EXAMPLES = int(os.environ.get("TRAINING_MIN_EXAMPLES", "5"))  # Gold examples required to complete training
+
+
+def get_real_ip(request: Request) -> str:
+    """
+    Get the real client IP, respecting X-Forwarded-For for reverse proxy setups.
+
+    Priority:
+    1. X-Forwarded-For header (first IP in chain)
+    2. X-Real-IP header
+    3. Direct client IP
+    """
+    # X-Forwarded-For can be comma-separated list, first is original client
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+
+    # Some proxies use X-Real-IP
+    real_ip = request.headers.get("X-Real-IP")
+    if real_ip:
+        return real_ip.strip()
+
+    # Fall back to direct client
+    return get_remote_address(request)
+
+
+# Initialize rate limiter with proxy-aware key function
+limiter = Limiter(
+    key_func=get_real_ip,
+    enabled=RATE_LIMIT_ENABLED,
+    default_limits=[RATE_LIMIT_DEFAULT],
+)
 
 # Controversial example flagging configuration
 CONTROVERSIAL_THRESHOLD = float(os.environ.get("CONTROVERSIAL_THRESHOLD", "0.5"))  # Auto-flag when agreement below this
@@ -373,6 +421,10 @@ app = FastAPI(
         "url": "https://opensource.org/licenses/MIT",
     },
 )
+
+# Attach rate limiter to app
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Mount static files
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
@@ -2346,7 +2398,8 @@ async def root():
     summary="Register a new user",
     description="Create a new user account. Returns a session cookie on success. Disabled when ANONYMOUS_MODE=1. If ADMIN_USER env var matches the username, user gets admin role.",
 )
-async def register(user: UserCreate, response: Response):
+@limiter.limit(RATE_LIMIT_AUTH)
+async def register(request: Request, user: UserCreate, response: Response):
     """Register a new user."""
     if ANONYMOUS_MODE:
         raise HTTPException(400, "Registration disabled in anonymous mode")
@@ -2402,7 +2455,8 @@ async def register(user: UserCreate, response: Response):
     summary="Log in",
     description="Authenticate with username and password. Returns a session cookie on success.",
 )
-async def login(user: UserLogin, response: Response):
+@limiter.limit(RATE_LIMIT_AUTH)
+async def login(request: Request, user: UserLogin, response: Response):
     """Log in a user."""
     if ANONYMOUS_MODE:
         raise HTTPException(400, "Login disabled in anonymous mode")
@@ -4061,7 +4115,9 @@ LABEL_MAP = {
     description="Import multiple NLI examples at once. Requires admin role. Accepts JSON array of examples.",
     response_model=ImportResponse,
 )
+@limiter.limit(RATE_LIMIT_AUTH)  # Strict limit for admin import
 async def bulk_import_examples(
+    http_request: Request,
     request: ImportRequest,
     admin: dict = Depends(require_admin),
 ):
@@ -4134,7 +4190,9 @@ async def bulk_import_examples(
     description="Import examples from JSONL format (one JSON object per line). Requires admin role.",
     response_model=ImportResponse,
 )
+@limiter.limit(RATE_LIMIT_AUTH)  # Strict limit for admin import
 async def import_jsonl(
+    request: Request,
     content: str = Body(..., media_type="text/plain", description="JSONL content (one JSON object per line)"),
     dataset: str = Query("imported", description="Dataset name for imported examples"),
     skip_duplicates: bool = Query(True, description="Skip duplicates instead of erroring"),
@@ -4702,7 +4760,9 @@ async def get_reliability_leaderboard(
 """,
     response_model=ExampleResponse,
 )
+@limiter.limit(RATE_LIMIT_ANNOTATION)
 async def get_next_example(
+    request: Request,
     dataset: str = Query(None, description="Filter by dataset (snli, mnli, anli, etc.)"),
     gold_label: str = Query(None, description="Filter by gold label (entailment, neutral, contradiction)"),
     user: dict = Depends(get_current_user)
@@ -4925,7 +4985,9 @@ async def get_example(
     summary="Submit annotation",
     description="Submit span labels and complexity scores for an example. Automatically releases any lock. Updates agreement metrics.",
 )
+@limiter.limit(RATE_LIMIT_ANNOTATION)
 async def submit_annotation(
+    request: Request,
     submission: AnnotationSubmission,
     user: dict = Depends(get_current_user)
 ):
@@ -5026,7 +5088,9 @@ async def submit_annotation(
     summary="Skip example",
     description="Mark an example as skipped. Skipped examples won't appear in /api/next for the current user. Releases any lock on the example.",
 )
+@limiter.limit(RATE_LIMIT_ANNOTATION)
 async def skip_example(
+    request: Request,
     example_id: str,
     user: dict = Depends(get_current_user)
 ):
