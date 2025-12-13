@@ -136,13 +136,24 @@
         .word-container {
             display: inline-block;
             position: relative;
-            margin: 2px 4px;
+            margin: 2px 0;
             vertical-align: top;
         }
 
-        /* Subword tokens have reduced left margin to visually connect */
-        .word-container.subword {
+        /* Word-initial tokens (not subwords) get left margin to separate from previous word */
+        .word-container:not(.subword) {
+            margin-left: 6px;
+        }
+
+        /* First token in a text block doesn't need left margin */
+        .words:first-child .word-container:first-child,
+        .word-container:first-child {
             margin-left: 0;
+        }
+
+        /* Subword tokens connect tightly to previous token */
+        .word-container.subword {
+            margin-left: 1px;
         }
 
         .word {
@@ -3218,11 +3229,14 @@
                 // Render personal stats card
                 renderPersonalStats(stats);
 
+                // Compute total labeled from per-dataset counts
+                const totalLabeled = Object.values(stats.labeled).reduce((sum, n) => sum + n, 0);
+
                 // Render general stats
                 let html = `
                     <div class="stat-card">
                         <div class="stat-label">Total Labeled</div>
-                        <div class="stat-value">${stats.total_labeled}</div>
+                        <div class="stat-value">${totalLabeled}</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">Total Spans</div>
