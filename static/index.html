@@ -1592,6 +1592,7 @@
             
             <div class="modal-tabs" id="help-tabs">
                 <button class="modal-tab active" onclick="switchHelpTab('overview')">Overview</button>
+                <button class="modal-tab" onclick="switchHelpTab('rubric')">Rubric</button>
                 <button class="modal-tab" onclick="switchHelpTab('labels')">Labels</button>
                 <button class="modal-tab" onclick="switchHelpTab('shortcuts')">Shortcuts</button>
                 <button class="modal-tab" onclick="switchHelpTab('api')">API</button>
@@ -1641,6 +1642,80 @@
                         Sometimes words are split into subword tokens, shown connected with a small dash.
                         For example, "running" might become "run" + "##ning".
                     </p>
+                </div>
+            </div>
+
+            <!-- Rubric Tab -->
+            <div id="help-rubric" class="help-tab-content">
+                <div class="help-content">
+                    <h3>The Core Principle</h3>
+                    <div class="tip" style="font-size: 1.1em; padding: 15px;">
+                        <strong>Mark the smallest set of tokens that, if removed, would change the NLI label.</strong>
+                    </div>
+                    <p>Mental test: "If I deleted this word, would the relationship still hold?"</p>
+
+                    <h3>Entailment Spans</h3>
+                    <p><strong>Definition:</strong> Tokens that establish the logical bridge between premise and hypothesis.</p>
+
+                    <p><strong>What to Mark:</strong></p>
+                    <ul>
+                        <li><strong>Aligned entities/concepts</strong> — Tokens in BOTH sentences referring to the same thing
+                            <br><code>P: A [man] plays [guitar]</code> → <code>H: A [person] plays [music]</code>
+                            <br>Mark: man↔person, guitar↔music</li>
+                        <li><strong>Entailing predicates</strong> — Verbs in premise that logically imply hypothesis
+                            <br><code>P: The cat is [sleeping]</code> → <code>H: The cat is [resting]</code></li>
+                        <li><strong>Scope markers</strong> — Words showing premise is more specific
+                            <br><code>P: [Three] dogs</code> → <code>H: [Some] dogs</code></li>
+                    </ul>
+                    <p><strong>Do NOT Mark:</strong> Determiners (a, the) unless they change meaning; punctuation; background details irrelevant to the inference.</p>
+
+                    <h3>Contradiction Spans</h3>
+                    <p><strong>Definition:</strong> Tokens that cannot both be true simultaneously.</p>
+
+                    <p><strong>What to Mark:</strong></p>
+                    <ul>
+                        <li><strong>Direct negation</strong> — <code>P: [open]</code> ↔ <code>H: [closed]</code></li>
+                        <li><strong>Incompatible quantities</strong> — <code>P: [All] students</code> ↔ <code>H: [No] students</code></li>
+                        <li><strong>Mutually exclusive predicates</strong> — <code>P: [standing]</code> ↔ <code>H: [sitting]</code></li>
+                        <li><strong>Entity mismatch</strong> — <code>P: [John] won</code> ↔ <code>H: [Mary] won</code> (if same event)</li>
+                    </ul>
+                    <p><strong>Do NOT Mark:</strong> Tokens that differ but aren't contradictory; background tokens consistent between both.</p>
+
+                    <h3>Neutral Spans</h3>
+                    <p><strong>Definition:</strong> Tokens introducing information not addressed by the other sentence. This is the trickiest category—neutral means "could be true or false given the premise."</p>
+
+                    <p><strong>What to Mark:</strong></p>
+                    <ul>
+                        <li><strong>Ungrounded details in hypothesis</strong>
+                            <br><code>P: A woman is walking</code> → <code>H: A woman is walking to [the store]</code>
+                            <br>Mark (H): "the store" — premise doesn't say where</li>
+                        <li><strong>Unmentioned entities</strong>
+                            <br><code>P: Two men are talking</code> → <code>H: Two [friends] are talking</code>
+                            <br>Mark: "friends" — relationship not established</li>
+                        <li><strong>Specificity gap</strong>
+                            <br><code>P: A person is eating</code> → <code>H: A person is eating [breakfast]</code>
+                            <br>Mark: "breakfast" — meal type not specified</li>
+                    </ul>
+                    <p><strong>Decision test:</strong> "Does the premise give evidence for or against this token?" If neither → neutral span.</p>
+
+                    <h3>Decision Tree</h3>
+                    <div style="background: var(--surface); padding: 15px; border-radius: 8px; font-family: monospace; font-size: 0.9em; line-height: 1.6;">
+                        "Should I mark this token?"<br>
+                        &nbsp;&nbsp;└► Would removing it change the NLI label?<br>
+                        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;YES → Mark it<br>
+                        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;NO → Don't mark<br><br>
+                        "Is this entailment, contradiction, or neutral?"<br>
+                        &nbsp;&nbsp;└► Can I be 100% certain of hypothesis from premise alone?<br>
+                        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;YES + matches → ENTAILMENT<br>
+                        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;YES + conflicts → CONTRADICTION<br>
+                        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;NO → NEUTRAL<br><br>
+                        "Multiple valid span sets?"<br>
+                        &nbsp;&nbsp;└► Flag it, pick one consistently, note in rationale
+                    </div>
+
+                    <div class="tip" style="margin-top: 15px;">
+                        <strong>Key Insight:</strong> Focus on the <em>relationship</em> between sentences, not just what each says individually. The same token might be neutral in one pair but contradictory in another.
+                    </div>
                 </div>
             </div>
 
