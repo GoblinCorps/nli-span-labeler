@@ -1635,7 +1635,7 @@
 
                     <h3>Complexity Scores</h3>
                     <p>
-                        Rate each example on a scale of <strong>1-100</strong> for six dimensions:
+                        Rate each example on a scale of <strong>0-10</strong> for six dimensions:
                     </p>
                     <ul>
                         <li><strong>Reasoning</strong> - How much logical inference is required?</li>
@@ -1836,7 +1836,7 @@
 
                 <!-- Training Complexity Scores -->
                 <div class="card complexity-section">
-                    <h3 style="margin-bottom: 15px;">Complexity Scores (1-100)</h3>
+                    <h3 style="margin-bottom: 15px;">Complexity Scores (0-10)</h3>
                     <div class="complexity-grid" id="training-complexity-grid"></div>
                 </div>
 
@@ -1911,7 +1911,7 @@
 
             <!-- Complexity Scores Section -->
             <div class="card complexity-section">
-                <h3 style="margin-bottom: 15px;">Complexity Scores (1-100)</h3>
+                <h3 style="margin-bottom: 15px;">Complexity Scores (0-10)</h3>
                 <div class="complexity-grid" id="complexity-grid"></div>
             </div>
 
@@ -2805,10 +2805,10 @@
                     <div class="complexity-label">${dim.label}</div>
                     <div class="complexity-input">
                         <input type="range" id="complexity-range-${dim.key}"
-                               min="1" max="100" value="50"
+                               min="0" max="10" value="0"
                                oninput="syncComplexity('${dim.key}', this.value, 'range')">
                         <input type="number" id="complexity-num-${dim.key}"
-                               min="1" max="100" value="50"
+                               min="0" max="10" value="0"
                                oninput="syncComplexity('${dim.key}', this.value, 'num')">
                     </div>
                 </div>
@@ -2817,7 +2817,7 @@
 
         function syncComplexity(key, value, source) {
             // Clamp value to valid range
-            value = Math.max(1, Math.min(100, parseInt(value) || 50));
+            value = Math.max(0, Math.min(10, parseInt(value) || 0));
 
             const rangeInput = document.getElementById(`complexity-range-${key}`);
             const numInput = document.getElementById(`complexity-num-${key}`);
@@ -2937,12 +2937,12 @@
             activeLabel = null;
             renderLabels();
 
-            // Reset complexity scores to 50
+            // Reset complexity scores to 0 (default on 0-10 scale)
             complexityDimensions.forEach(dim => {
                 const rangeInput = document.getElementById(`complexity-range-${dim.key}`);
                 const numInput = document.getElementById(`complexity-num-${dim.key}`);
-                if (rangeInput) rangeInput.value = 50;
-                if (numInput) numInput.value = 50;
+                if (rangeInput) rangeInput.value = 0;
+                if (numInput) numInput.value = 0;
             });
         }
 
@@ -4454,12 +4454,12 @@
 
         function initTrainingComplexityScores() {
             trainingComplexityScores = {
-                reasoning: 50,
-                creativity: 50,
-                domain_knowledge: 50,
-                contextual: 50,
-                constraints: 50,
-                ambiguity: 50
+                reasoning: 0,
+                creativity: 0,
+                domain_knowledge: 0,
+                contextual: 0,
+                constraints: 0,
+                ambiguity: 0
             };
 
             const grid = document.getElementById('training-complexity-grid');
@@ -4475,9 +4475,9 @@
             grid.innerHTML = dimensions.map(d => `
                 <div class="complexity-item">
                     <label title="${d.desc}">${d.label}</label>
-                    <input type="range" min="1" max="100" value="50"
+                    <input type="range" min="0" max="10" value="0"
                            oninput="updateTrainingScore('${d.key}', this.value)">
-                    <span class="score-value" id="training-score-${d.key}">50</span>
+                    <span class="score-value" id="training-score-${d.key}">0</span>
                 </div>
             `).join('');
         }
