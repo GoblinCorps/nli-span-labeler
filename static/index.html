@@ -369,6 +369,96 @@
             color: var(--text-secondary);
         }
 
+        /* Edge Case Flags Section */
+        .edge-case-section {
+            margin-top: 15px;
+            padding: 15px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
+            border-left: 3px solid var(--warning);
+        }
+
+        .edge-case-section h4 {
+            margin: 0 0 12px 0;
+            font-size: 0.95rem;
+            color: var(--warning);
+        }
+
+        .edge-case-flags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .edge-case-flag {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+            padding: 6px 10px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 6px;
+            border: 1px solid transparent;
+            transition: all 0.2s;
+        }
+
+        .edge-case-flag:hover {
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .edge-case-flag.checked {
+            border-color: var(--warning);
+            background: rgba(251, 191, 36, 0.15);
+        }
+
+        .edge-case-flag input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            accent-color: var(--warning);
+        }
+
+        .edge-case-flag label {
+            cursor: pointer;
+            font-size: 0.85rem;
+            user-select: none;
+        }
+
+        .rationale-section {
+            margin-top: 12px;
+        }
+
+        .rationale-toggle {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            margin-bottom: 8px;
+        }
+
+        .rationale-toggle:hover {
+            color: var(--text-primary);
+        }
+
+        .rationale-textarea {
+            width: 100%;
+            min-height: 60px;
+            padding: 10px;
+            background: #1a1a2e;
+            border: 1px solid #444;
+            border-radius: 6px;
+            color: var(--text-primary);
+            font-size: 0.9rem;
+            resize: vertical;
+        }
+
+        .rationale-textarea:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
         .labels-section { margin-top: 20px; }
 
         .labels-header {
@@ -2101,6 +2191,34 @@
                 <div id="difficulty-justification-list" class="difficulty-justification-grid"></div>
             </div>
 
+            <!-- Edge Case Flags -->
+            <div class="edge-case-section">
+                <h4>⚠️ Edge Case Flags</h4>
+                <div class="edge-case-flags">
+                    <div class="edge-case-flag" onclick="toggleEdgeCaseFlag('ambiguous_gold')">
+                        <input type="checkbox" id="flag-ambiguous-gold" onclick="event.stopPropagation(); toggleEdgeCaseFlag('ambiguous_gold')">
+                        <label for="flag-ambiguous-gold">Ambiguous gold label</label>
+                    </div>
+                    <div class="edge-case-flag" onclick="toggleEdgeCaseFlag('multiple_valid')">
+                        <input type="checkbox" id="flag-multiple-valid" onclick="event.stopPropagation(); toggleEdgeCaseFlag('multiple_valid')">
+                        <label for="flag-multiple-valid">Multiple valid span sets</label>
+                    </div>
+                    <div class="edge-case-flag" onclick="toggleEdgeCaseFlag('needs_discussion')">
+                        <input type="checkbox" id="flag-needs-discussion" onclick="event.stopPropagation(); toggleEdgeCaseFlag('needs_discussion')">
+                        <label for="flag-needs-discussion">Needs discussion</label>
+                    </div>
+                </div>
+                <div class="rationale-section">
+                    <div class="rationale-toggle" onclick="toggleRationaleField()">
+                        <span id="rationale-arrow">▶</span>
+                        <span>Add rationale (optional)</span>
+                    </div>
+                    <textarea id="annotation-rationale" class="rationale-textarea hidden"
+                              placeholder="Explain your reasoning on this difficult example..."
+                              oninput="updateRationaleArrow()"></textarea>
+                </div>
+            </div>
+
             <!-- Actions -->
             <div class="actions">
                 <div>
@@ -3313,6 +3431,9 @@
             // Clear difficulty justifications
             difficultyJustifications.clear();
             renderDifficultyJustifications();
+
+            // Clear edge case flags
+            resetEdgeCaseFlags();
         }
 
         function renderExample() {
@@ -3675,6 +3796,74 @@
             });
         }
 
+        // ============================================================================
+        // Edge Case Flags
+        // ============================================================================
+
+        const edgeCaseFlags = new Set();  // Tracks which flags are checked
+
+        function toggleEdgeCaseFlag(flagKey) {
+            const checkbox = document.getElementById(`flag-${flagKey.replace(/_/g, '-')}`);
+            const container = checkbox?.closest('.edge-case-flag');
+
+            if (edgeCaseFlags.has(flagKey)) {
+                edgeCaseFlags.delete(flagKey);
+                if (checkbox) checkbox.checked = false;
+                if (container) container.classList.remove('checked');
+            } else {
+                edgeCaseFlags.add(flagKey);
+                if (checkbox) checkbox.checked = true;
+                if (container) container.classList.add('checked');
+            }
+        }
+
+        function toggleRationaleField() {
+            const textarea = document.getElementById('annotation-rationale');
+            const arrow = document.getElementById('rationale-arrow');
+            if (textarea.classList.contains('hidden')) {
+                textarea.classList.remove('hidden');
+                arrow.textContent = '▼';
+                textarea.focus();
+            } else {
+                textarea.classList.add('hidden');
+                arrow.textContent = '▶';
+            }
+        }
+
+        function updateRationaleArrow() {
+            const textarea = document.getElementById('annotation-rationale');
+            const arrow = document.getElementById('rationale-arrow');
+            // Keep arrow pointing down if there's content
+            if (textarea.value.trim()) {
+                arrow.textContent = '▼';
+            }
+        }
+
+        function getEdgeCaseData() {
+            return {
+                flags: Array.from(edgeCaseFlags),
+                rationale: document.getElementById('annotation-rationale')?.value.trim() || ''
+            };
+        }
+
+        function resetEdgeCaseFlags() {
+            edgeCaseFlags.clear();
+            // Reset checkboxes
+            document.querySelectorAll('.edge-case-flag').forEach(el => {
+                el.classList.remove('checked');
+                const checkbox = el.querySelector('input[type="checkbox"]');
+                if (checkbox) checkbox.checked = false;
+            });
+            // Reset rationale
+            const textarea = document.getElementById('annotation-rationale');
+            if (textarea) {
+                textarea.value = '';
+                textarea.classList.add('hidden');
+            }
+            const arrow = document.getElementById('rationale-arrow');
+            if (arrow) arrow.textContent = '▶';
+        }
+
         function clearSelections() {
             labels.forEach(label => {
                 label.spans = { premise: new Set(), hypothesis: new Set() };
@@ -3683,6 +3872,8 @@
             // Also clear difficulty justifications
             difficultyJustifications.clear();
             renderDifficultyJustifications();
+            // Also clear edge case flags
+            resetEdgeCaseFlags();
             renderLabels();
             updateWordHighlights();
             showMessage('Cleared all selections', 'success');
@@ -3792,6 +3983,9 @@
                 return;
             }
 
+            // Get edge case flags and rationale
+            const edgeCaseData = getEdgeCaseData();
+
             try {
                 const resp = await authenticatedFetch('/api/label', {
                     method: 'POST',
@@ -3800,7 +3994,9 @@
                         example_id: currentExample.id,
                         labels: labelData,
                         complexity_scores: complexityScores,
-                        difficulty_justifications: difficultyJustificationData
+                        difficulty_justifications: difficultyJustificationData,
+                        edge_case_flags: edgeCaseData.flags,
+                        rationale: edgeCaseData.rationale
                     })
                 });
 
