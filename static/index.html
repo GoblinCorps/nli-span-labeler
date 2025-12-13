@@ -2640,6 +2640,10 @@
             ]);
             initLabels();
             initComplexityInputs();
+            // Check if user needs training before loading examples
+            if (typeof checkTrainingStatus === 'function') {
+                await checkTrainingStatus();
+            }
             loadNextExample();
         }
 
@@ -3195,7 +3199,12 @@
             document.querySelectorAll('.nav-tab').forEach(el => el.classList.remove('active'));
             document.getElementById(`${tabName}-tab`).classList.remove('hidden');
             document.querySelector(`.nav-tab[data-tab="${tabName}"]`).classList.add('active');
+
+            // Tab-specific loading handlers
             if (tabName === 'stats') loadStats();
+            if (tabName === 'admin' && typeof loadAdminDashboard === 'function') loadAdminDashboard();
+            if (tabName === 'gold-examples' && typeof loadGoldExamples === 'function') loadGoldExamples();
+            if (tabName === 'flagged' && typeof loadFlaggedExamples === 'function') loadFlaggedExamples();
         }
 
         async function loadStats() {
@@ -3273,7 +3282,7 @@
             }
         }
 
-        function renderPersonalStats(stats) {
+        async function renderPersonalStats(stats) {
             const card = document.getElementById('personal-stats-card');
             const grid = document.getElementById('personal-stats-grid');
 
@@ -3848,14 +3857,7 @@
             updateAdminTabVisibility();
         };
 
-        // Load admin dashboard when tab is switched
-        const originalSwitchTab = switchTab;
-        switchTab = function(tabName) {
-            originalSwitchTab(tabName);
-            if (tabName === 'admin') {
-                loadAdminDashboard();
-            }
-        };
+        // Admin dashboard loading is now handled in switchTab()
 
         // ============================================================================
         // Quality Review Functions (Admin Only)
@@ -4400,21 +4402,8 @@
             }
         }
 
-        // Hook into tab switching
-        const originalSwitchTab = switchTab;
-        switchTab = function(tabName) {
-            originalSwitchTab(tabName);
-            if (tabName === 'gold-examples') {
-                loadGoldExamples();
-            }
-        };
-
-        // Check training status after login
-        const originalOnLoginSuccess = onLoginSuccess;
-        onLoginSuccess = async function(user) {
-            await originalOnLoginSuccess(user);
-            checkTrainingStatus();
-        };
+        // Gold examples loading is now handled in switchTab()
+        // Training status check is now handled in initializeApp()
 
         // ============================================================================
         // Flagged Examples Functions (Admin Only)
@@ -4654,14 +4643,7 @@
             }
         }
 
-        // Initialize flagged tab when switched to
-        const originalSwitchTab2 = switchTab;
-        switchTab = function(tabName) {
-            originalSwitchTab2(tabName);
-            if (tabName === 'flagged') {
-                loadFlaggedExamples();
-            }
-        };
+        // Flagged examples loading is now handled in switchTab()
 
         // Close flag detail modal on escape
         document.addEventListener('keydown', function(e) {
