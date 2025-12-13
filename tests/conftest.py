@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 # Set test environment before importing app
 os.environ["ANONYMOUS_MODE"] = "0"
 os.environ["ADMIN_USER"] = "test_admin"
+os.environ["RATE_LIMIT_ENABLED"] = "0"  # Disable rate limiting in tests
 
 
 @pytest.fixture
