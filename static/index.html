@@ -3763,6 +3763,35 @@
                 }
             });
 
+            // Validate: sliders >5 require justification spans
+            const missingJustifications = [];
+            complexityDimensions.forEach(dim => {
+                const score = complexityScores[dim.key] || 0;
+                if (score > DIFFICULTY_THRESHOLD) {
+                    const justification = difficultyJustifications.get(dim.key);
+                    const hasSpans = justification &&
+                        (justification.spans.premise.size > 0 || justification.spans.hypothesis.size > 0);
+                    if (!hasSpans) {
+                        missingJustifications.push(dim.label);
+                    }
+                }
+            });
+
+            if (missingJustifications.length > 0) {
+                const dimList = missingJustifications.join(', ');
+                showMessage(`High scores (>5) require justification spans for: ${dimList}`, 'error');
+                // Highlight the justification section
+                const justifySection = document.getElementById('difficulty-justification-section');
+                if (justifySection) {
+                    justifySection.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    justifySection.style.boxShadow = '0 0 0 3px var(--error)';
+                    setTimeout(() => {
+                        justifySection.style.boxShadow = '';
+                    }, 3000);
+                }
+                return;
+            }
+
             try {
                 const resp = await authenticatedFetch('/api/label', {
                     method: 'POST',
