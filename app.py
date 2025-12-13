@@ -4591,10 +4591,19 @@ async def get_reliability_leaderboard(
 )
 async def get_next_example(
     dataset: str = Query(None, description="Filter by dataset (snli, mnli, anli, etc.)"),
+    gold_label: str = Query(None, description="Filter by gold label (entailment, neutral, contradiction)"),
     user: dict = Depends(get_current_user)
 ):
     """Get the next example to annotate with calibration-aware routing."""
     user_id = user["id"]
+
+    # Convert gold_label text to numeric if provided
+    gold_label_num = None
+    if gold_label:
+        label_map = {"entailment": 0, "e": 0, "neutral": 1, "n": 1, "contradiction": 2, "c": 2}
+        gold_label_num = label_map.get(gold_label.lower())
+        if gold_label_num is None:
+            raise HTTPException(400, f"Invalid gold_label: {gold_label}. Use entailment/neutral/contradiction")
 
     with get_db() as conn:
         # Clean up expired locks
@@ -4635,6 +4644,10 @@ async def get_next_example(
                 query += " AND e.dataset = ?"
                 params.append(dataset)
 
+            if gold_label_num is not None:
+                query += " AND e.gold_label = ?"
+                params.append(gold_label_num)
+
             query += " ORDER BY RANDOM() LIMIT 1"
             row = conn.execute(query, params).fetchone()
 
@@ -4657,6 +4670,10 @@ async def get_next_example(
             if dataset:
                 query += " AND e.dataset = ?"
                 params.append(dataset)
+
+            if gold_label_num is not None:
+                query += " AND e.gold_label = ?"
+                params.append(gold_label_num)
 
             query += " ORDER BY pool_priority, RANDOM() LIMIT 1"
             row = conn.execute(query, params).fetchone()

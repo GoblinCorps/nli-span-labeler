@@ -78,7 +78,11 @@ def get_session() -> SessionManager:
 # =============================================================================
 
 @mcp.tool()
-def get_next_example(dataset: Optional[str] = None) -> dict:
+def get_next_example(
+    dataset: Optional[str] = None,
+    gold_label: Optional[str] = None,
+    compact: bool = False,
+) -> dict:
     """
     Fetch the next example to annotate.
 
@@ -87,6 +91,8 @@ def get_next_example(dataset: Optional[str] = None) -> dict:
 
     Args:
         dataset: Optional dataset filter (snli, mnli, anli)
+        gold_label: Optional label filter (entailment, neutral, contradiction)
+        compact: If True, return minimal response (id, display only)
 
     Returns:
         Example data with id, premise, hypothesis, tokens, and auto-spans,
@@ -99,12 +105,20 @@ def get_next_example(dataset: Optional[str] = None) -> dict:
     if dataset is None:
         dataset = session.state.active_dataset
 
-    example = client.get_next_example(dataset=dataset)
+    example = client.get_next_example(dataset=dataset, gold_label=gold_label)
     if example is None:
         return {"error": "No examples available", "dataset_filter": dataset}
 
     # Store in session
     session.set_current_example(example)
+
+    # Compact mode: minimal response for context-constrained agents
+    if compact:
+        return {
+            "id": example["id"],
+            "gold_label": example.get("gold_label_text", "unknown"),
+            "display": fmt.format_example_display(example),
+        }
 
     return {
         "id": example["id"],
@@ -200,6 +214,7 @@ def add_span(
     label_name: str,
     source: str,
     word_indices: list[int],
+    compact: bool = False,
 ) -> dict:
     """
     Add spans to the current annotation.
@@ -211,6 +226,7 @@ def add_span(
         label_name: Label to apply (e.g., "novel_info", "aligned_tokens")
         source: Either "premise" or "hypothesis"
         word_indices: List of token indices to label
+        compact: If True, omit pending_labels from response
 
     Returns:
         Updated pending labels or error.
@@ -246,13 +262,103 @@ def add_span(
         session.add_span(label_name, span)
         added.append(idx)
 
-    return {
+    result = {
         "label": label_name,
         "source": source,
         "added_indices": added,
         "errors": errors if errors else None,
-        "pending_labels": session.state.progress.labels,
         "display": fmt.format_span_result(label_name, source, added, words, errors),
+    }
+    if not compact:
+        result["pending_labels"] = session.state.progress.labels
+    return result
+
+
+@mcp.tool()
+def add_spans_batch(
+    label_name: str,
+    premise_indices: Optional[list[int]] = None,
+    hypothesis_indices: Optional[list[int]] = None,
+    compact: bool = True,
+) -> dict:
+    """
+    Add spans from both premise and hypothesis in a single call.
+
+    More efficient than calling add_span twice for labels that span both sources.
+    Compact by default since this is the ergonomic choice.
+
+    Args:
+        label_name: Label to apply (e.g., "aligned_tokens", "novel_info")
+        premise_indices: Token indices from premise (optional)
+        hypothesis_indices: Token indices from hypothesis (optional)
+        compact: If True (default), return minimal response
+
+    Returns:
+        Summary of all added spans.
+    """
+    session = get_session()
+
+    if session.state.current_example is None:
+        return {"error": "No current example. Use get_next_example first."}
+
+    example = session.state.current_example
+    results = {"premise": [], "hypothesis": []}
+    all_errors = []
+
+    # Process premise
+    if premise_indices:
+        words = example.get("premise_words", [])
+        for idx in premise_indices:
+            if idx < 0 or idx >= len(words):
+                all_errors.append(f"Premise index {idx} invalid (max: {len(words) - 1})")
+                continue
+            word = words[idx]
+            span = {
+                "source": "premise",
+                "word_index": idx,
+                "word_text": word.get("text", "").strip(),
+                "char_start": word.get("char_start", 0),
+                "char_end": word.get("char_end", 0),
+            }
+            session.add_span(label_name, span)
+            results["premise"].append(idx)
+
+    # Process hypothesis
+    if hypothesis_indices:
+        words = example.get("hypothesis_words", [])
+        for idx in hypothesis_indices:
+            if idx < 0 or idx >= len(words):
+                all_errors.append(f"Hypothesis index {idx} invalid (max: {len(words) - 1})")
+                continue
+            word = words[idx]
+            span = {
+                "source": "hypothesis",
+                "word_index": idx,
+                "word_text": word.get("text", "").strip(),
+                "char_start": word.get("char_start", 0),
+                "char_end": word.get("char_end", 0),
+            }
+            session.add_span(label_name, span)
+            results["hypothesis"].append(idx)
+
+    # Format display
+    lines = [f"✅ Added to **{label_name}**:"]
+    if results["premise"]:
+        p_words = example.get("premise_words", [])
+        p_strs = [f"{fmt.subscript_number(i)}{p_words[i].get('text', '').strip()}" for i in results["premise"] if i < len(p_words)]
+        lines.append(f"   📖 Premise: {' '.join(p_strs)}")
+    if results["hypothesis"]:
+        h_words = example.get("hypothesis_words", [])
+        h_strs = [f"{fmt.subscript_number(i)}{h_words[i].get('text', '').strip()}" for i in results["hypothesis"] if i < len(h_words)]
+        lines.append(f"   💭 Hypothesis: {' '.join(h_strs)}")
+    if all_errors:
+        lines.append(f"   ⚠️ Errors: {', '.join(all_errors)}")
+
+    return {
+        "label": label_name,
+        "added": results,
+        "errors": all_errors if all_errors else None,
+        "display": "\n".join(lines),
     }
 
 

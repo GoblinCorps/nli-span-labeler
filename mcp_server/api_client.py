@@ -106,9 +106,17 @@ class NLIApiClient:
         response.raise_for_status()
         return response.json()
 
-    def get_next_example(self, dataset: Optional[str] = None) -> Optional[dict]:
+    def get_next_example(
+        self,
+        dataset: Optional[str] = None,
+        gold_label: Optional[str] = None,
+    ) -> Optional[dict]:
         """
         Get the next example to annotate.
+
+        Args:
+            dataset: Optional dataset filter (snli, mnli, anli)
+            gold_label: Optional label filter (entailment, neutral, contradiction)
 
         Returns None if no examples are available.
         """
@@ -116,6 +124,8 @@ class NLIApiClient:
         params = {}
         if dataset:
             params["dataset"] = dataset
+        if gold_label:
+            params["gold_label"] = gold_label
 
         response = self._client.get("/api/next", params=params)
         if response.status_code == 404:
