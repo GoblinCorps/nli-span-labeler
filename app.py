@@ -25,6 +25,7 @@ Usage:
 
 Environment Variables:
     ANONYMOUS_MODE=1  - Disable auth, use anonymous user (for local single-user)
+    ALLOW_ANONYMOUS_SUBMISSIONS=1  - Allow logged-out users to submit (modal dismissable)
     TOKENIZER_MODEL=answerdotai/ModernBERT-base  - HuggingFace model for tokenizer
     LOCK_TIMEOUT_MINUTES=30  - How long example locks last (default: 30)
     ADMIN_USER=username  - Bootstrap admin user (gets admin role on startup)
@@ -67,6 +68,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # Configuration
 ANONYMOUS_MODE = os.environ.get("ANONYMOUS_MODE", "0") == "1"
+ALLOW_ANONYMOUS_SUBMISSIONS = os.environ.get("ALLOW_ANONYMOUS_SUBMISSIONS", "0") == "1"  # Allow logged-out users to submit
 SESSION_EXPIRY_DAYS = 30
 ANONYMOUS_USER_ID = 1
 LEGACY_USER_ID = 2
@@ -1709,19 +1711,34 @@ async def get_current_user(request: Request) -> dict:
             "role": ROLE_ANNOTATOR,
             "is_anonymous": True
         }
-    
+
     token = request.cookies.get("session")
     user = get_user_from_session(token)
-    
+
     if not user:
+        # If anonymous submissions allowed, return anonymous user
+        if ALLOW_ANONYMOUS_SUBMISSIONS:
+            return {
+                "id": ANONYMOUS_USER_ID,
+                "username": "anonymous",
+                "display_name": "Anonymous User",
+                "role": ROLE_ANNOTATOR,
+                "is_anonymous": True
+            }
         raise HTTPException(401, "Not authenticated. Please log in.")
-    
+
     return user
 
 
 async def get_optional_user(request: Request) -> Optional[dict]:
     """Dependency to get current user, or None if not authenticated."""
-    if ANONYMOUS_MODE:
+    if ANONYMOUS_MODE or ALLOW_ANONYMOUS_SUBMISSIONS:
+        # Check for logged-in user first
+        token = request.cookies.get("session")
+        user = get_user_from_session(token)
+        if user:
+            return user
+        # Fall back to anonymous
         return {
             "id": ANONYMOUS_USER_ID,
             "username": "anonymous",
@@ -2121,6 +2138,7 @@ async def auth_status():
     """Get authentication status and mode."""
     return {
         "anonymous_mode": ANONYMOUS_MODE,
+        "allow_anonymous_submissions": ALLOW_ANONYMOUS_SUBMISSIONS,
         "registration_enabled": not ANONYMOUS_MODE,
         "admin_bootstrap_configured": bool(ADMIN_USER)
     }
