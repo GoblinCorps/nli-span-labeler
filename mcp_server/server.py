@@ -14,6 +14,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .api_client import APIConfig, NLIApiClient
 from .session import SessionManager
+from . import formatting as fmt
 
 
 # Configuration from environment
@@ -115,6 +116,7 @@ def get_next_example(dataset: Optional[str] = None) -> dict:
         "hypothesis_tokens": _format_tokens(example.get("hypothesis_words", [])),
         "auto_spans": example.get("auto_spans", {}),
         "lock_until": example.get("lock_until"),
+        "display": fmt.format_example_display(example),
     }
 
 
@@ -148,6 +150,12 @@ def get_current_example() -> dict:
         "pending_labels": progress.labels,
         "pending_scores": progress.complexity_scores,
         "edge_case_flags": progress.edge_case_flags,
+        "display": fmt.format_progress_display(
+            example,
+            progress.labels,
+            progress.complexity_scores,
+            progress.edge_case_flags,
+        ),
     }
 
 
@@ -179,6 +187,7 @@ def get_example_by_id(example_id: str) -> dict:
         "premise_tokens": _format_tokens(example.get("premise_words", [])),
         "hypothesis_tokens": _format_tokens(example.get("hypothesis_words", [])),
         "auto_spans": example.get("auto_spans", {}),
+        "display": fmt.format_example_display(example),
     }
 
 
@@ -243,6 +252,7 @@ def add_span(
         "added_indices": added,
         "errors": errors if errors else None,
         "pending_labels": session.state.progress.labels,
+        "display": fmt.format_span_result(label_name, source, added, words, errors),
     }
 
 
@@ -348,6 +358,7 @@ def set_difficulty(
     return {
         "pending_scores": session.state.progress.complexity_scores,
         "errors": errors if errors else None,
+        "display": fmt.format_difficulty_scores(session.state.progress.complexity_scores),
     }
 
 
@@ -445,6 +456,12 @@ def submit_annotation() -> dict:
         "labels_submitted": len(labels),
         "agreement": result.get("agreement"),
         "session_completed": session.state.examples_completed,
+        "display": fmt.format_submission_result(
+            example_id,
+            len(labels),
+            result.get("agreement"),
+            session.state.examples_completed,
+        ),
     }
 
 
@@ -496,7 +513,9 @@ def get_session_stats() -> dict:
     Returns progress for this annotation session.
     """
     session = get_session()
-    return session.get_session_summary()
+    stats = session.get_session_summary()
+    stats["display"] = fmt.format_session_stats(stats)
+    return stats
 
 
 @mcp.tool()
@@ -519,7 +538,9 @@ def get_leaderboard() -> dict:
     Shows ranking by reliability score for all annotators.
     """
     client = get_api_client()
-    return client.get_leaderboard()
+    data = client.get_leaderboard()
+    data["display"] = fmt.format_leaderboard(data)
+    return data
 
 
 @mcp.tool()
@@ -569,7 +590,184 @@ def get_label_schema() -> dict:
     Returns available system labels and custom label policy.
     """
     client = get_api_client()
-    return client.get_labels()
+    schema = client.get_labels()
+    schema["display"] = fmt.format_label_schema(schema)
+    return schema
+
+
+# =============================================================================
+# MCP Tools - Discussion Helpers
+# =============================================================================
+
+@mcp.tool()
+def show_tokens(source: str = "both") -> dict:
+    """
+    Show tokens of the current example with indices.
+
+    Useful during discussion to reference specific words.
+    Use subscript indices to discuss: "I think ₃walks and ₂enters are aligned"
+
+    Args:
+        source: "premise", "hypothesis", or "both" (default)
+
+    Returns:
+        Formatted token display.
+    """
+    session = get_session()
+
+    if session.state.current_example is None:
+        return {"error": "No current example. Use get_next_example first."}
+
+    example = session.state.current_example
+    lines = []
+
+    if source in ("premise", "both"):
+        premise_words = example.get("premise_words", [])
+        lines.append("📖 **PREMISE tokens:**")
+        lines.append(f"   {fmt.format_indexed_tokens(premise_words)}")
+
+    if source in ("hypothesis", "both"):
+        hyp_words = example.get("hypothesis_words", [])
+        if lines:
+            lines.append("")
+        lines.append("💭 **HYPOTHESIS tokens:**")
+        lines.append(f"   {fmt.format_indexed_tokens(hyp_words)}")
+
+    return {
+        "source": source,
+        "display": "\n".join(lines),
+    }
+
+
+@mcp.tool()
+def find_token(text: str, source: str = "both") -> dict:
+    """
+    Find tokens containing the given text.
+
+    Searches premise and/or hypothesis for tokens matching the search text.
+    Returns indices that can be used with add_span.
+
+    Args:
+        text: Text to search for (case-insensitive)
+        source: "premise", "hypothesis", or "both" (default)
+
+    Returns:
+        Matching token indices and words.
+    """
+    session = get_session()
+
+    if session.state.current_example is None:
+        return {"error": "No current example. Use get_next_example first."}
+
+    example = session.state.current_example
+    text_lower = text.lower()
+
+    matches = {"premise": [], "hypothesis": []}
+
+    if source in ("premise", "both"):
+        for i, w in enumerate(example.get("premise_words", [])):
+            word_text = w.get("text", "").strip().lower()
+            if text_lower in word_text:
+                matches["premise"].append({
+                    "index": i,
+                    "text": w.get("text", "").strip(),
+                })
+
+    if source in ("hypothesis", "both"):
+        for i, w in enumerate(example.get("hypothesis_words", [])):
+            word_text = w.get("text", "").strip().lower()
+            if text_lower in word_text:
+                matches["hypothesis"].append({
+                    "index": i,
+                    "text": w.get("text", "").strip(),
+                })
+
+    # Format display
+    lines = [f"🔍 Search results for \"{text}\":"]
+
+    if matches["premise"]:
+        premise_strs = [f"{fmt.subscript_number(m['index'])}{m['text']}" for m in matches["premise"]]
+        lines.append(f"   📖 Premise: {' '.join(premise_strs)}")
+    elif source in ("premise", "both"):
+        lines.append("   📖 Premise: (no matches)")
+
+    if matches["hypothesis"]:
+        hyp_strs = [f"{fmt.subscript_number(m['index'])}{m['text']}" for m in matches["hypothesis"]]
+        lines.append(f"   💭 Hypothesis: {' '.join(hyp_strs)}")
+    elif source in ("hypothesis", "both"):
+        lines.append("   💭 Hypothesis: (no matches)")
+
+    return {
+        "search_text": text,
+        "matches": matches,
+        "display": "\n".join(lines),
+    }
+
+
+@mcp.tool()
+def suggest_alignment() -> dict:
+    """
+    Suggest potential token alignments between premise and hypothesis.
+
+    Uses simple word matching to suggest which tokens might be aligned.
+    These are suggestions for discussion - not authoritative annotations.
+
+    Returns:
+        List of potential alignments with indices.
+    """
+    session = get_session()
+
+    if session.state.current_example is None:
+        return {"error": "No current example. Use get_next_example first."}
+
+    example = session.state.current_example
+    premise_words = example.get("premise_words", [])
+    hyp_words = example.get("hypothesis_words", [])
+
+    # Build word -> indices map for both (normalized lowercase)
+    premise_map: dict[str, list[int]] = {}
+    for i, w in enumerate(premise_words):
+        text = w.get("text", "").strip().lower()
+        if text and len(text) > 2:  # Skip short words
+            premise_map.setdefault(text, []).append(i)
+
+    hyp_map: dict[str, list[int]] = {}
+    for i, w in enumerate(hyp_words):
+        text = w.get("text", "").strip().lower()
+        if text and len(text) > 2:  # Skip short words
+            hyp_map.setdefault(text, []).append(i)
+
+    # Find overlapping words
+    alignments = []
+    common_words = set(premise_map.keys()) & set(hyp_map.keys())
+
+    for word in common_words:
+        p_indices = premise_map[word]
+        h_indices = hyp_map[word]
+        alignments.append({
+            "word": word,
+            "premise_indices": p_indices,
+            "hypothesis_indices": h_indices,
+        })
+
+    # Format display
+    lines = ["🔗 **Suggested Alignments** (exact word matches):"]
+
+    if alignments:
+        for a in alignments[:10]:  # Limit to top 10
+            p_strs = [f"P{fmt.subscript_number(i)}" for i in a["premise_indices"]]
+            h_strs = [f"H{fmt.subscript_number(i)}" for i in a["hypothesis_indices"]]
+            lines.append(f"   • \"{a['word']}\": {', '.join(p_strs)} ↔ {', '.join(h_strs)}")
+    else:
+        lines.append("   (no exact word matches found)")
+
+    lines.append("")
+    lines.append("💡 Use `add_span('aligned_tokens', 'premise', [indices])` to mark these")
+
+    return {
+        "alignments": alignments,
+        "display": "\n".join(lines),
+    }
 
 
 # =============================================================================
