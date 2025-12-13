@@ -35,7 +35,7 @@ except ImportError:
 
 LABEL_MAP = {0: "entailment", 1: "neutral", 2: "contradiction"}
 OUTPUT_DIR = Path(__file__).parent.parent / "data" / "nli"
-DB_PATH = Path(__file__).parent.parent / "annotations.db"
+DB_PATH = Path(__file__).parent.parent / "labels.db"  # Must match app.py DB_PATH
 DEFAULT_SAMPLE_SIZE = 500
 
 
