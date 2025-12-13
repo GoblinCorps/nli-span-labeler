@@ -1396,8 +1396,9 @@
 </head>
 <body>
     <!-- Auth Modal -->
-    <div id="auth-modal" class="modal-overlay hidden">
+    <div id="auth-modal" class="modal-overlay hidden" onclick="handleAuthOverlayClick(event)">
         <div class="modal">
+            <button id="auth-modal-close" class="modal-close hidden" onclick="dismissAuthModal()">&times;</button>
             <h2>NLI Span Labeler</h2>
             <div class="modal-tabs">
                 <button class="modal-tab active" onclick="switchAuthTab('login')">Login</button>
@@ -1442,6 +1443,11 @@
 
             <div id="anonymous-note" class="anonymous-note hidden">
                 Running in anonymous mode. No login required.
+            </div>
+
+            <div id="dismiss-note" class="anonymous-note hidden">
+                <p style="margin-bottom: 8px;">Anonymous submissions are enabled.</p>
+                <button type="button" class="btn btn-secondary" onclick="dismissAuthModal()">Continue as Anonymous</button>
             </div>
         </div>
     </div>
@@ -2195,12 +2201,15 @@
         // Authentication
         // ============================================================================
 
+        let allowAnonymousSubmissions = false;
+
         async function checkAuthStatus() {
             try {
                 // First check if we're in anonymous mode
                 const statusResp = await fetch('/api/auth/status');
                 const status = await statusResp.json();
                 isAnonymousMode = status.anonymous_mode;
+                allowAnonymousSubmissions = status.allow_anonymous_submissions;
 
                 if (isAnonymousMode) {
                     // Anonymous mode - no login needed
@@ -2237,10 +2246,33 @@
             if (isAnonymousMode) {
                 document.getElementById('anonymous-note').classList.remove('hidden');
             }
+            // Show dismiss option if anonymous submissions allowed
+            if (allowAnonymousSubmissions && !isAnonymousMode) {
+                document.getElementById('dismiss-note').classList.remove('hidden');
+                document.getElementById('auth-modal-close').classList.remove('hidden');
+            }
         }
 
         function hideAuthModal() {
             document.getElementById('auth-modal').classList.add('hidden');
+        }
+
+        function handleAuthOverlayClick(event) {
+            // Only dismiss if clicking the overlay itself (not the modal content)
+            // and anonymous submissions are allowed
+            if (event.target.id === 'auth-modal' && allowAnonymousSubmissions) {
+                dismissAuthModal();
+            }
+        }
+
+        function dismissAuthModal() {
+            if (allowAnonymousSubmissions || isAnonymousMode) {
+                currentUser = { username: 'anonymous', display_name: 'Anonymous', is_anonymous: true };
+                hideAuthModal();
+                updateUserDisplay();
+                // Load initial data
+                loadNextExample();
+            }
         }
 
         function switchAuthTab(tab) {
