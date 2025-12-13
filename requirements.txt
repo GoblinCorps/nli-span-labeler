@@ -14,3 +14,6 @@ nltk>=3.8.0
 # Testing
 pytest>=7.0.0
 httpx>=0.24.0  # Required by FastAPI TestClient
+
+# MCP Server
+mcp>=1.0.0
