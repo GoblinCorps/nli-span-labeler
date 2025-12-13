@@ -1832,7 +1832,12 @@ async def register(user: UserCreate, response: Response):
         samesite="lax"
     )
     
-    return {"status": "registered", "user_id": user_id, "username": user.username, "role": role}
+    return {
+        "id": user_id,
+        "username": user.username,
+        "display_name": user.display_name or user.username,
+        "role": role
+    }
 
 
 @app.post(
@@ -1893,17 +1898,15 @@ async def logout(request: Request, response: Response):
     description="Get information about the currently authenticated user, including their role.",
     response_model=UserResponse,
 )
-async def get_me(user: dict = Depends(get_optional_user)):
+async def get_me(user: dict = Depends(get_current_user)):
     """Get current user info."""
-    if user:
-        return UserResponse(
-            id=user["id"],
-            username=user["username"],
-            display_name=user.get("display_name"),
-            role=user.get("role", ROLE_ANNOTATOR),
-            is_anonymous=user.get("is_anonymous", False)
-        )
-    return {"authenticated": False, "anonymous_mode": ANONYMOUS_MODE}
+    return UserResponse(
+        id=user["id"],
+        username=user["username"],
+        display_name=user.get("display_name"),
+        role=user.get("role", ROLE_ANNOTATOR),
+        is_anonymous=user.get("is_anonymous", False)
+    )
 
 
 @app.get(
