@@ -237,6 +237,74 @@
         .color-7 { background: rgba(251, 191, 36, 0.3); border-color: #fbbf24; color: #fbbf24; }
         .color-8 { background: rgba(248, 113, 113, 0.3); border-color: #f87171; color: #f87171; }
 
+        /* Auto-spans display (read-only Tier 0/1 labels) */
+        .auto-spans-section {
+            margin-top: 15px;
+            padding: 12px;
+            background: rgba(0, 0, 0, 0.15);
+            border-radius: 8px;
+            border-left: 3px solid var(--text-secondary);
+        }
+
+        .auto-spans-header {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .auto-spans-header::before {
+            content: '🤖';
+            font-size: 1rem;
+        }
+
+        .auto-spans-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .auto-span-tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            background: rgba(100, 100, 100, 0.3);
+            border-radius: 12px;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            opacity: 0.8;
+        }
+
+        .auto-span-tag .label-name {
+            font-weight: 500;
+        }
+
+        .auto-span-tag .token-list {
+            color: #aaa;
+            max-width: 200px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .auto-span-tag.tier0 {
+            border: 1px solid rgba(100, 100, 100, 0.5);
+        }
+
+        .auto-span-tag.tier1 {
+            border: 1px solid rgba(139, 92, 246, 0.5);
+            background: rgba(139, 92, 246, 0.15);
+        }
+
+        .auto-spans-empty {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            font-style: italic;
+        }
+
         .labels-section { margin-top: 20px; }
 
         .labels-header {
@@ -2869,7 +2937,16 @@
                         ${renderWords(currentExample.hypothesis_words, 'hypothesis')}
                     </div>
                 </div>
+                <div class="auto-spans-section" id="auto-spans-container">
+                    <div class="auto-spans-header">Auto-detected patterns</div>
+                    <div id="auto-spans-content" class="auto-spans-list">
+                        <span class="auto-spans-empty">Loading...</span>
+                    </div>
+                </div>
             `;
+
+            // Load auto-spans for this example
+            loadAutoSpans(currentExample.id);
 
             // Load existing labels if any
             if (currentExample.existing_labels && currentExample.existing_labels.length > 0) {
@@ -2912,6 +2989,124 @@
                     </span>
                 `;
             }).join('');
+        }
+
+        // ============================================================================
+        // Auto-spans Display (Tier 0/1 read-only labels)
+        // ============================================================================
+
+        async function loadAutoSpans(exampleId) {
+            const container = document.getElementById('auto-spans-content');
+            if (!container) return;
+
+            try {
+                const resp = await authenticatedFetch(`/api/auto-spans/${exampleId}`);
+                if (!resp.ok) {
+                    container.innerHTML = '<span class="auto-spans-empty">Unable to load auto-spans</span>';
+                    return;
+                }
+
+                const data = await resp.json();
+                renderAutoSpans(data.auto_spans);
+            } catch (e) {
+                console.error('Failed to load auto-spans:', e);
+                container.innerHTML = '<span class="auto-spans-empty">Error loading auto-spans</span>';
+            }
+        }
+
+        function renderAutoSpans(autoSpans) {
+            const container = document.getElementById('auto-spans-content');
+            if (!container || !autoSpans) return;
+
+            const tags = [];
+
+            // Human-readable label names
+            const labelNames = {
+                'aligned_tokens': 'Aligned',
+                'premise_only': 'Premise only',
+                'hypothesis_only': 'Hypothesis only',
+                'negation': 'Negation',
+                'quantifier': 'Quantifier',
+                'modal': 'Modal',
+                'conditional': 'Conditional',
+                'temporal': 'Temporal',
+                'causal': 'Causal',
+                'hypernym': 'Hypernym',
+                'hyponym': 'Hyponym',
+                'synonym': 'Synonym',
+                'antonym': 'Antonym'
+            };
+
+            // Process Tier 0 labels
+            if (autoSpans.tier0) {
+                Object.entries(autoSpans.tier0).forEach(([label, sources]) => {
+                    const premiseIndices = sources.premise || [];
+                    const hypothesisIndices = sources.hypothesis || [];
+                    const allIndices = [...premiseIndices, ...hypothesisIndices];
+
+                    if (allIndices.length > 0) {
+                        const displayName = labelNames[label] || label.replace(/_/g, ' ');
+                        const tokenText = getTokenText(premiseIndices, hypothesisIndices);
+                        tags.push(`
+                            <span class="auto-span-tag tier0" title="${label}: ${tokenText}">
+                                <span class="label-name">${displayName}</span>
+                                <span class="token-list">${tokenText}</span>
+                            </span>
+                        `);
+                    }
+                });
+            }
+
+            // Process Tier 1 labels (WordNet-based, future)
+            if (autoSpans.tier1) {
+                Object.entries(autoSpans.tier1).forEach(([label, sources]) => {
+                    const premiseIndices = sources.premise || [];
+                    const hypothesisIndices = sources.hypothesis || [];
+                    const allIndices = [...premiseIndices, ...hypothesisIndices];
+
+                    if (allIndices.length > 0) {
+                        const displayName = labelNames[label] || label.replace(/_/g, ' ');
+                        const tokenText = getTokenText(premiseIndices, hypothesisIndices);
+                        tags.push(`
+                            <span class="auto-span-tag tier1" title="${label}: ${tokenText}">
+                                <span class="label-name">${displayName}</span>
+                                <span class="token-list">${tokenText}</span>
+                            </span>
+                        `);
+                    }
+                });
+            }
+
+            if (tags.length === 0) {
+                container.innerHTML = '<span class="auto-spans-empty">No patterns detected</span>';
+            } else {
+                container.innerHTML = tags.join('');
+            }
+        }
+
+        function getTokenText(premiseIndices, hypothesisIndices) {
+            const parts = [];
+            if (premiseIndices.length > 0 && currentExample) {
+                const tokens = premiseIndices
+                    .map(i => currentExample.premise_words[i]?.text || '')
+                    .filter(t => t)
+                    .map(t => t.replace(/Ġ|▁/g, '').trim())
+                    .filter(t => t);
+                if (tokens.length > 0) {
+                    parts.push(`P: ${tokens.slice(0, 3).join(', ')}${tokens.length > 3 ? '...' : ''}`);
+                }
+            }
+            if (hypothesisIndices.length > 0 && currentExample) {
+                const tokens = hypothesisIndices
+                    .map(i => currentExample.hypothesis_words[i]?.text || '')
+                    .filter(t => t)
+                    .map(t => t.replace(/Ġ|▁/g, '').trim())
+                    .filter(t => t);
+                if (tokens.length > 0) {
+                    parts.push(`H: ${tokens.slice(0, 3).join(', ')}${tokens.length > 3 ? '...' : ''}`);
+                }
+            }
+            return parts.join(' | ') || 'tokens';
         }
 
         function handleWordClick(source, index) {
