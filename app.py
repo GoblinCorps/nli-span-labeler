@@ -8,7 +8,7 @@ Features:
 - Pre-filled labels for difficulty dimensions and NLI relations
 - Custom label creation with unique colors
 - Multiple labels per token visualization
-- Complexity scoring (1-100 scale)
+- Complexity scoring (0-10 scale)
 - SQLite persistence
 - Stats dashboard and export
 - Multi-user support with session-based authentication
@@ -212,7 +212,7 @@ A multi-user annotation tool for Natural Language Inference (NLI) examples with 
 
 - **Span-level annotation**: Select specific tokens in premise/hypothesis pairs
 - **Multiple labels per token**: Annotate tokens with multiple semantic labels
-- **Complexity scoring**: Rate examples on 6 difficulty dimensions (1-100 scale)
+- **Complexity scoring**: Rate examples on 6 difficulty dimensions (0-10 scale)
 - **Multi-user support**: Session-based authentication with per-user annotation tracking
 - **Role-based access**: Admin and annotator roles with protected endpoints
 - **WordPiece tokenization**: Uses ModernBERT tokenizer for model-aligned annotations
@@ -1094,9 +1094,9 @@ def calculate_complexity_agreement(scores: list[dict]) -> float:
         mean_val = sum(values) / len(values)
         mad = sum(abs(v - mean_val) for v in values) / len(values)
         
-        # Normalize to 0-1 scale (max deviation is 50 on a 1-100 scale)
-        # Agreement = 1 - (MAD / 50)
-        dimension_agreement = max(0, 1 - (mad / 50))
+        # Normalize to 0-1 scale (max deviation is 5 on a 0-10 scale)
+        # Agreement = 1 - (MAD / 5)
+        dimension_agreement = max(0, 1 - (mad / 5))
         total_agreement += dimension_agreement
         valid_dimensions += 1
     
