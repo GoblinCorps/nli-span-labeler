@@ -49,7 +49,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from collections import defaultdict
 
-from fastapi import FastAPI, HTTPException, Query, Request, Response, Depends, Cookie
+from fastapi import FastAPI, HTTPException, Query, Request, Response, Depends, Cookie, Body
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel, Field
@@ -347,7 +347,13 @@ def init_db():
             "SELECT name FROM sqlite_master WHERE type='table' AND name='labels'"
         )
         labels_exist = cursor.fetchone() is not None
-        
+
+        # Check if annotator_agreement table exists (for reliability migration)
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='annotator_agreement'"
+        )
+        annotator_agreement_exists = cursor.fetchone() is not None
+
         # Check if annotator_id column exists in labels
         needs_user_migration = False
         needs_custom_migration = False
