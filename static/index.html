@@ -2789,6 +2789,17 @@
                 const resp = await authenticatedFetch(url);
                 const data = await resp.json();
 
+                // Handle 404 (no more examples)
+                if (!resp.ok) {
+                    if (resp.status === 404) {
+                        area.innerHTML = `<div class="message info">${data.detail || 'No more examples to annotate. All done!'}</div>`;
+                    } else {
+                        area.innerHTML = `<div class="message error">${data.detail || 'Error loading example'}</div>`;
+                    }
+                    currentExample = null;
+                    return;
+                }
+
                 if (data.complete) {
                     area.innerHTML = `<div class="message success">${data.message}</div>`;
                     currentExample = null;
@@ -2869,7 +2880,9 @@
                 const containerClass = isSubword ? 'word-container subword' : 'word-container';
                 const wordClass = isSubword ? 'word subword' : 'word';
                 const title = w.token ? `Token: ${w.token}` : '';
-                
+                // Clean up tokenizer artifacts (Ġ = leading space in GPT-2/RoBERTa tokenizers)
+                const displayText = (w.text || '').replace(/Ġ/g, '').replace(/▁/g, '') || w.text;
+
                 return `
                     <span class="${containerClass}">
                         <span class="${wordClass}"
@@ -2879,7 +2892,7 @@
                               data-char-end="${w.char_end}"
                               data-is-subword="${isSubword}"
                               title="${title}"
-                              onclick="handleWordClick('${source}', ${w.index})">${w.text}</span>
+                              onclick="handleWordClick('${source}', ${w.index})">${displayText}</span>
                         <div class="label-dots" data-source="${source}" data-index="${w.index}"></div>
                     </span>
                 `;
