@@ -305,6 +305,70 @@
             font-style: italic;
         }
 
+        /* Difficulty Justification Section (conditional spans) */
+        .difficulty-justifications-section {
+            margin-top: 15px;
+            border-left: 3px solid var(--accent);
+        }
+
+        .difficulty-justification-grid {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .difficulty-justification-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 12px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
+            cursor: pointer;
+            border: 2px solid transparent;
+            transition: all 0.2s;
+        }
+
+        .difficulty-justification-item:hover {
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .difficulty-justification-item.active {
+            border-color: var(--accent);
+            background: rgba(74, 158, 255, 0.15);
+        }
+
+        .justification-color {
+            width: 16px;
+            height: 16px;
+            border-radius: 4px;
+            flex-shrink: 0;
+        }
+
+        .justification-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .justification-name {
+            font-weight: 500;
+            font-size: 0.9rem;
+        }
+
+        .justification-prompt {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            margin-top: 2px;
+        }
+
+        .justification-count {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+
         .labels-section { margin-top: 20px; }
 
         .labels-header {
@@ -1915,6 +1979,15 @@
                 <div class="complexity-grid" id="complexity-grid"></div>
             </div>
 
+            <!-- Difficulty Justification Spans (shown when any complexity > 5) -->
+            <div id="difficulty-justifications" class="card difficulty-justifications-section hidden">
+                <h3 style="margin-bottom: 10px;">📍 Justify High Scores</h3>
+                <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 15px;">
+                    For dimensions rated &gt;5, click to select, then mark tokens that justify that rating.
+                </p>
+                <div id="difficulty-justification-list" class="difficulty-justification-grid"></div>
+            </div>
+
             <!-- Actions -->
             <div class="actions">
                 <div>
@@ -2827,6 +2900,113 @@
             } else {
                 rangeInput.value = value;
             }
+
+            // Show/hide justification span prompt when value > 5
+            updateDifficultyJustification(key, value);
+        }
+
+        // ============================================================================
+        // Conditional Difficulty Span Justifications
+        // ============================================================================
+
+        const DIFFICULTY_THRESHOLD = 5;  // Show justification prompt when slider > this value
+        const difficultyJustifications = new Map();  // key -> { active: bool, spans: { premise: Set, hypothesis: Set } }
+
+        const difficultyLabels = {
+            reasoning: { color: '#3b82f6', prompt: 'Mark tokens requiring logical inference' },
+            creativity: { color: '#8b5cf6', prompt: 'Mark tokens needing imaginative interpretation' },
+            domain_knowledge: { color: '#06b6d4', prompt: 'Mark tokens requiring specialized knowledge' },
+            contextual: { color: '#22c55e', prompt: 'Mark tokens depending on implicit context' },
+            constraints: { color: '#eab308', prompt: 'Mark tokens representing conditions to track' },
+            ambiguity: { color: '#f97316', prompt: 'Mark tokens that are ambiguous or debatable' }
+        };
+
+        function updateDifficultyJustification(key, value) {
+            const container = document.getElementById('difficulty-justifications');
+            if (!container) return;
+
+            if (value > DIFFICULTY_THRESHOLD) {
+                // Show justification prompt
+                if (!difficultyJustifications.has(key)) {
+                    difficultyJustifications.set(key, {
+                        active: false,
+                        spans: { premise: new Set(), hypothesis: new Set() }
+                    });
+                }
+                renderDifficultyJustifications();
+            } else {
+                // Hide justification prompt
+                difficultyJustifications.delete(key);
+                renderDifficultyJustifications();
+            }
+        }
+
+        function renderDifficultyJustifications() {
+            const container = document.getElementById('difficulty-justifications');
+            if (!container) return;
+
+            if (difficultyJustifications.size === 0) {
+                container.classList.add('hidden');
+                return;
+            }
+
+            container.classList.remove('hidden');
+            const list = document.getElementById('difficulty-justification-list');
+
+            list.innerHTML = Array.from(difficultyJustifications.entries()).map(([key, data]) => {
+                const label = difficultyLabels[key];
+                const displayName = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                const spanCount = data.spans.premise.size + data.spans.hypothesis.size;
+
+                return `
+                    <div class="difficulty-justification-item ${data.active ? 'active' : ''}"
+                         onclick="selectDifficultyJustification('${key}')"
+                         data-key="${key}">
+                        <div class="justification-color" style="background: ${label.color}"></div>
+                        <div class="justification-info">
+                            <div class="justification-name">${displayName}</div>
+                            <div class="justification-prompt">${label.prompt}</div>
+                        </div>
+                        <div class="justification-count">${spanCount}</div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function selectDifficultyJustification(key) {
+            // Deactivate all other justifications and regular labels
+            difficultyJustifications.forEach((data, k) => {
+                data.active = (k === key) ? !data.active : false;
+            });
+            activeLabel = null;  // Deselect regular labels
+            renderLabels();
+            renderDifficultyJustifications();
+            updateWordHighlights();
+        }
+
+        function getActiveDifficultyJustification() {
+            for (const [key, data] of difficultyJustifications) {
+                if (data.active) return key;
+            }
+            return null;
+        }
+
+        function toggleDifficultyJustificationWord(source, index) {
+            const activeKey = getActiveDifficultyJustification();
+            if (!activeKey) return false;
+
+            const data = difficultyJustifications.get(activeKey);
+            if (!data) return false;
+
+            if (data.spans[source].has(index)) {
+                data.spans[source].delete(index);
+            } else {
+                data.spans[source].add(index);
+            }
+
+            renderDifficultyJustifications();
+            updateWordHighlights();
+            return true;
         }
 
         // ============================================================================
@@ -2868,6 +3048,11 @@
 
         function selectLabel(idx) {
             activeLabel = activeLabel === idx ? null : idx;
+            // Deselect any active difficulty justification when selecting a regular label
+            difficultyJustifications.forEach((data, key) => {
+                data.active = false;
+            });
+            renderDifficultyJustifications();
             renderLabels();
             updateWordHighlights();
         }
@@ -2944,6 +3129,10 @@
                 if (rangeInput) rangeInput.value = 0;
                 if (numInput) numInput.value = 0;
             });
+
+            // Clear difficulty justifications
+            difficultyJustifications.clear();
+            renderDifficultyJustifications();
         }
 
         function renderExample() {
@@ -3177,6 +3366,11 @@
         }
 
         function toggleWord(source, index) {
+            // Check for active difficulty justification first
+            if (toggleDifficultyJustificationWord(source, index)) {
+                return;  // Handled by difficulty justification
+            }
+
             if (activeLabel === null) {
                 showMessage('Select a label first (click or press 1-9)', 'error');
                 return;
@@ -3260,6 +3454,45 @@
                     }
                 });
             });
+
+            // Also highlight difficulty justification spans
+            const activeJustification = getActiveDifficultyJustification();
+            difficultyJustifications.forEach((data, key) => {
+                const color = difficultyLabels[key].color;
+                ['premise', 'hypothesis'].forEach(source => {
+                    data.spans[source].forEach(wordIdx => {
+                        const wordEl = document.querySelector(
+                            `.word[data-source="${source}"][data-index="${wordIdx}"]`
+                        );
+                        const dotsEl = document.querySelector(
+                            `.label-dots[data-source="${source}"][data-index="${wordIdx}"]`
+                        );
+
+                        if (wordEl) {
+                            // Add visual indicator for difficulty justification
+                            if (key === activeJustification) {
+                                wordEl.style.borderColor = color;
+                                wordEl.style.borderWidth = '2px';
+                                wordEl.style.borderStyle = 'dashed';
+                                wordEl.style.background = `${color}20`;  // 20 = 12% opacity in hex
+                            }
+                        }
+
+                        if (dotsEl) {
+                            // Add a square marker (not dot) to distinguish from regular labels
+                            const marker = document.createElement('div');
+                            marker.className = 'label-dot';
+                            marker.style.background = color;
+                            marker.style.borderRadius = '2px';  // Square-ish
+                            marker.title = `${key.replace(/_/g, ' ')} justification`;
+                            if (key === activeJustification) {
+                                marker.classList.add('active-label');
+                            }
+                            dotsEl.appendChild(marker);
+                        }
+                    });
+                });
+            });
         }
 
         function clearSelections() {
@@ -3267,6 +3500,9 @@
                 label.spans = { premise: new Set(), hypothesis: new Set() };
             });
             activeLabel = null;
+            // Also clear difficulty justifications
+            difficultyJustifications.clear();
+            renderDifficultyJustifications();
             renderLabels();
             updateWordHighlights();
             showMessage('Cleared all selections', 'success');
@@ -3312,7 +3548,38 @@
             complexityDimensions.forEach(dim => {
                 const numInput = document.getElementById(`complexity-num-${dim.key}`);
                 if (numInput) {
-                    complexityScores[dim.key] = parseInt(numInput.value) || 50;
+                    complexityScores[dim.key] = parseInt(numInput.value) || 0;
+                }
+            });
+
+            // Build difficulty justification spans
+            const difficultyJustificationData = {};
+            difficultyJustifications.forEach((data, key) => {
+                if (data.spans.premise.size > 0 || data.spans.hypothesis.size > 0) {
+                    difficultyJustificationData[key] = {
+                        spans: [
+                            ...Array.from(data.spans.premise).map(idx => {
+                                const wordData = currentExample.premise_words[idx];
+                                return {
+                                    source: 'premise',
+                                    word_index: idx,
+                                    word_text: wordData.text,
+                                    char_start: wordData.char_start,
+                                    char_end: wordData.char_end
+                                };
+                            }),
+                            ...Array.from(data.spans.hypothesis).map(idx => {
+                                const wordData = currentExample.hypothesis_words[idx];
+                                return {
+                                    source: 'hypothesis',
+                                    word_index: idx,
+                                    word_text: wordData.text,
+                                    char_start: wordData.char_start,
+                                    char_end: wordData.char_end
+                                };
+                            })
+                        ]
+                    };
                 }
             });
 
@@ -3323,7 +3590,8 @@
                     body: JSON.stringify({
                         example_id: currentExample.id,
                         labels: labelData,
-                        complexity_scores: complexityScores
+                        complexity_scores: complexityScores,
+                        difficulty_justifications: difficultyJustificationData
                     })
                 });
 
