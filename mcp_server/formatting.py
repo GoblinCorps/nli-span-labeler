@@ -75,7 +75,12 @@ def format_example_display(example: dict, include_auto_spans: bool = True) -> st
     """
     example_id = example.get("id", "unknown")
     dataset = example.get("dataset", "")
-    gold_label = example.get("gold_label", example.get("gold_label_text", "unknown")).lower()
+    # Prefer text label, fall back to numeric with mapping
+    gold_label_raw = example.get("gold_label_text") or example.get("gold_label", "unknown")
+    if isinstance(gold_label_raw, int):
+        gold_label = {0: "entailment", 1: "neutral", 2: "contradiction"}.get(gold_label_raw, "unknown")
+    else:
+        gold_label = str(gold_label_raw).lower()
 
     premise_words = example.get("premise_words", [])
     hyp_words = example.get("hypothesis_words", [])
@@ -108,15 +113,26 @@ def format_example_display(example: dict, include_auto_spans: bool = True) -> st
     lines.append(f"🏷️ Gold Label: {label_emoji} {gold_label.upper()}")
 
     # Auto-spans summary if present
+    # Structure: {tier0: {label: {premise: [idx], hypothesis: [idx]}}, tier1: {...}}
     auto_spans = example.get("auto_spans", {})
     if include_auto_spans and auto_spans:
         lines.append("")
         lines.append("🤖 **Auto-detected spans:**")
-        for label_name, spans in auto_spans.items():
-            if spans:
-                indices = [s.get("word_index", "?") for s in spans]
-                source = spans[0].get("source", "?") if spans else "?"
-                lines.append(f"   • {label_name}: {source} [{', '.join(map(str, indices))}]")
+        for tier_name, tier_labels in auto_spans.items():
+            if not tier_labels:
+                continue
+            for label_name, sources in tier_labels.items():
+                if not sources:
+                    continue
+                parts = []
+                premise_idx = sources.get("premise", [])
+                hyp_idx = sources.get("hypothesis", [])
+                if premise_idx:
+                    parts.append(f"P[{','.join(map(str, premise_idx))}]")
+                if hyp_idx:
+                    parts.append(f"H[{','.join(map(str, hyp_idx))}]")
+                if parts:
+                    lines.append(f"   • {label_name}: {' '.join(parts)}")
 
     lines.append("═" * 50)
 
@@ -130,7 +146,11 @@ def format_example_compact(example: dict) -> str:
     Useful for lists or when space is limited.
     """
     example_id = example.get("id", "unknown")
-    gold_label = example.get("gold_label", example.get("gold_label_text", "unknown")).lower()
+    gold_label_raw = example.get("gold_label_text") or example.get("gold_label", "unknown")
+    if isinstance(gold_label_raw, int):
+        gold_label = {0: "entailment", 1: "neutral", 2: "contradiction"}.get(gold_label_raw, "unknown")
+    else:
+        gold_label = str(gold_label_raw).lower()
     premise = example.get("premise", "")[:50]
 
     label_emoji = LABEL_EMOJI.get(gold_label, "❓")
@@ -155,7 +175,11 @@ def format_progress_display(
     lines = []
 
     example_id = example.get("id", "unknown")
-    gold_label = example.get("gold_label", example.get("gold_label_text", "unknown")).lower()
+    gold_label_raw = example.get("gold_label_text") or example.get("gold_label", "unknown")
+    if isinstance(gold_label_raw, int):
+        gold_label = {0: "entailment", 1: "neutral", 2: "contradiction"}.get(gold_label_raw, "unknown")
+    else:
+        gold_label = str(gold_label_raw).lower()
 
     premise_words = example.get("premise_words", [])
     hyp_words = example.get("hypothesis_words", [])
