@@ -458,11 +458,33 @@
             display: flex;
             flex-direction: column;
             gap: 5px;
+            padding: 4px 8px;
+            border-radius: 6px;
+            border: 2px solid transparent;
+            transition: border-color 0.2s, background 0.2s;
+        }
+
+        .complexity-item.focused {
+            border-color: var(--accent);
+            background: rgba(74, 158, 255, 0.1);
         }
 
         .complexity-label {
             font-size: 0.85rem;
             color: var(--text-secondary);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .slider-key-hint {
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+            opacity: 0.6;
+            background: rgba(255, 255, 255, 0.1);
+            padding: 2px 5px;
+            border-radius: 3px;
+            font-family: monospace;
         }
 
         .complexity-input {
@@ -1760,6 +1782,21 @@
                             </div>
                         </div>
                         <div class="shortcuts-section">
+                            <h4>Difficulty Sliders</h4>
+                            <div class="shortcut-row">
+                                <span class="shortcut-keys"><span class="shortcut-key">Shift</span>+<span class="shortcut-key">1</span>-<span class="shortcut-key">6</span></span>
+                                <span class="shortcut-desc">Focus slider (R/C/D/X/N/A)</span>
+                            </div>
+                            <div class="shortcut-row">
+                                <span class="shortcut-keys"><span class="shortcut-key">+</span> <span class="shortcut-key">-</span></span>
+                                <span class="shortcut-desc">Adjust focused slider ±1</span>
+                            </div>
+                            <div class="shortcut-row">
+                                <span class="shortcut-keys"><span class="shortcut-key">0</span>-<span class="shortcut-key">9</span></span>
+                                <span class="shortcut-desc">Set slider value directly</span>
+                            </div>
+                        </div>
+                        <div class="shortcuts-section">
                             <h4>Actions</h4>
                             <div class="shortcut-row">
                                 <span class="shortcut-keys"><span class="shortcut-key">Enter</span></span>
@@ -1784,9 +1821,10 @@
                     </div>
 
                     <div class="tip" style="margin-top: 20px;">
-                        <strong>Power User Workflow:</strong> Press <code>1</code> to select "reasoning", 
-                        use <code>j/k</code> to navigate, <code>Space</code> to mark, then <code>Enter</code> to save.
-                        You can annotate without touching the mouse!
+                        <strong>Power User Workflow:</strong> Press <code>1</code> to select "reasoning",
+                        use <code>j/k</code> to navigate, <code>Space</code> to mark. Set difficulty with
+                        <code>Shift+1</code> then type <code>7</code>. Hit <code>Enter</code> to save.
+                        Full keyboard annotation, no mouse required!
                     </div>
                 </div>
             </div>
@@ -2620,6 +2658,40 @@
                 return;
             }
 
+            // Shift+1-6: Focus difficulty sliders
+            if (e.shiftKey && e.key >= '1' && e.key <= '6') {
+                e.preventDefault();
+                focusSlider(parseInt(e.key) - 1);
+                return;
+            }
+
+            // +/- or =/_ : Adjust focused slider (= is unshifted +, - works both ways)
+            if (focusedSliderIndex >= 0) {
+                if (e.key === '+' || e.key === '=' || e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    adjustFocusedSlider(1);
+                    return;
+                }
+                if (e.key === '-' || e.key === '_' || e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    adjustFocusedSlider(-1);
+                    return;
+                }
+                // Direct number input for slider (0-9 sets value directly when slider focused)
+                if (!e.shiftKey && e.key >= '0' && e.key <= '9') {
+                    e.preventDefault();
+                    const dim = complexityDimensions[focusedSliderIndex];
+                    syncComplexity(dim.key, parseInt(e.key), 'keyboard');
+                    return;
+                }
+                // Escape clears slider focus
+                if (e.key === 'Escape') {
+                    e.preventDefault();
+                    clearSliderFocus();
+                    return;
+                }
+            }
+
             switch (e.key) {
                 // Navigation: j/k or arrows
                 case 'j':
@@ -2655,7 +2727,7 @@
                     toggleLabelOnFocusedWord();
                     break;
 
-                // Number keys 1-9: toggle specific label
+                // Number keys 1-9: toggle specific label (only when no slider focused)
                 case '1': case '2': case '3': case '4': case '5':
                 case '6': case '7': case '8': case '9':
                     e.preventDefault();
@@ -2871,11 +2943,16 @@
             renderLegend();
         }
 
+        let focusedSliderIndex = -1;  // Track which slider has keyboard focus
+
         function initComplexityInputs() {
             const grid = document.getElementById('complexity-grid');
-            grid.innerHTML = complexityDimensions.map(dim => `
-                <div class="complexity-item">
-                    <div class="complexity-label">${dim.label}</div>
+            grid.innerHTML = complexityDimensions.map((dim, idx) => `
+                <div class="complexity-item" id="complexity-item-${dim.key}">
+                    <div class="complexity-label">
+                        ${dim.label}
+                        <span class="slider-key-hint">Shift+${idx + 1}</span>
+                    </div>
                     <div class="complexity-input">
                         <input type="range" id="complexity-range-${dim.key}"
                                min="0" max="10" value="0"
@@ -2886,6 +2963,34 @@
                     </div>
                 </div>
             `).join('');
+        }
+
+        function focusSlider(index) {
+            if (index < 0 || index >= complexityDimensions.length) return;
+            focusedSliderIndex = index;
+            const dim = complexityDimensions[index];
+            const rangeInput = document.getElementById(`complexity-range-${dim.key}`);
+            if (rangeInput) {
+                rangeInput.focus();
+                // Highlight the slider item
+                document.querySelectorAll('.complexity-item').forEach(el => el.classList.remove('focused'));
+                document.getElementById(`complexity-item-${dim.key}`)?.classList.add('focused');
+            }
+        }
+
+        function adjustFocusedSlider(delta) {
+            if (focusedSliderIndex < 0 || focusedSliderIndex >= complexityDimensions.length) return;
+            const dim = complexityDimensions[focusedSliderIndex];
+            const numInput = document.getElementById(`complexity-num-${dim.key}`);
+            if (numInput) {
+                const newValue = Math.max(0, Math.min(10, parseInt(numInput.value) + delta));
+                syncComplexity(dim.key, newValue, 'keyboard');
+            }
+        }
+
+        function clearSliderFocus() {
+            focusedSliderIndex = -1;
+            document.querySelectorAll('.complexity-item').forEach(el => el.classList.remove('focused'));
         }
 
         function syncComplexity(key, value, source) {
