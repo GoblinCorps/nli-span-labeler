@@ -158,3 +158,60 @@ class TestLocking:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "extended"
+
+
+class TestAutoSpans:
+    """Tests for auto-spans (Tier 0/1 automatic labels)."""
+
+    def test_auto_spans_included_in_next(self, auth_client_with_example: tuple[TestClient, dict, dict]):
+        """Test that /api/next includes auto_spans in response."""
+        client, user, example = auth_client_with_example
+        response = client.get("/api/next")
+        assert response.status_code == 200
+        data = response.json()
+        assert "auto_spans" in data
+        assert "tier0" in data["auto_spans"]
+
+    def test_auto_spans_included_in_example(self, auth_client_with_example: tuple[TestClient, dict, dict]):
+        """Test that /api/example/{id} includes auto_spans in response."""
+        client, user, example = auth_client_with_example
+        response = client.get(f"/api/example/{example['id']}")
+        assert response.status_code == 200
+        data = response.json()
+        assert "auto_spans" in data
+        assert "tier0" in data["auto_spans"]
+
+    def test_auto_spans_endpoint(self, auth_client_with_example: tuple[TestClient, dict, dict]):
+        """Test direct /api/auto-spans/{id} endpoint."""
+        client, user, example = auth_client_with_example
+        response = client.get(f"/api/auto-spans/{example['id']}")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["example_id"] == example["id"]
+        assert "auto_spans" in data
+        assert "tier0" in data["auto_spans"]
+
+    def test_auto_spans_tier0_labels(self, auth_client_with_example: tuple[TestClient, dict, dict]):
+        """Test that Tier 0 labels are computed correctly."""
+        client, user, example = auth_client_with_example
+        response = client.get(f"/api/auto-spans/{example['id']}")
+        assert response.status_code == 200
+        data = response.json()
+        tier0 = data["auto_spans"]["tier0"]
+
+        # Should have alignment labels
+        expected_labels = ["aligned_tokens", "premise_only", "hypothesis_only"]
+        for label in expected_labels:
+            if label in tier0:
+                assert "premise" in tier0[label] or "hypothesis" in tier0[label]
+
+    def test_auto_spans_requires_auth(self, fresh_client: TestClient):
+        """Test /api/auto-spans requires authentication."""
+        response = fresh_client.get("/api/auto-spans/test_example")
+        assert response.status_code == 401
+
+    def test_auto_spans_not_found(self, auth_client: tuple[TestClient, dict]):
+        """Test /api/auto-spans returns 404 for nonexistent example."""
+        client, user = auth_client
+        response = client.get("/api/auto-spans/nonexistent_example_id")
+        assert response.status_code == 404
