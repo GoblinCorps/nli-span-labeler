@@ -215,3 +215,49 @@ class TestAutoSpans:
         client, user = auth_client
         response = client.get("/api/auto-spans/nonexistent_example_id")
         assert response.status_code == 404
+
+
+class TestTier1WordNet:
+    """Tests for Tier 1 WordNet-based semantic relation labels."""
+
+    def test_tier1_included_in_auto_spans(self, auth_client_with_example: tuple[TestClient, dict, dict]):
+        """Test that /api/auto-spans includes tier1 structure."""
+        client, user, example = auth_client_with_example
+        response = client.get(f"/api/auto-spans/{example['id']}")
+        assert response.status_code == 200
+        data = response.json()
+        assert "tier1" in data["auto_spans"]
+
+    def test_tier1_label_structure(self, auth_client_with_example: tuple[TestClient, dict, dict]):
+        """Test that Tier 1 labels have correct structure."""
+        client, user, example = auth_client_with_example
+        response = client.get(f"/api/auto-spans/{example['id']}")
+        assert response.status_code == 200
+        data = response.json()
+        tier1 = data["auto_spans"]["tier1"]
+
+        # Tier 1 labels should have premise/hypothesis arrays when present
+        for label_name, spans in tier1.items():
+            assert "premise" in spans or "hypothesis" in spans
+            if "premise" in spans:
+                assert isinstance(spans["premise"], list)
+            if "hypothesis" in spans:
+                assert isinstance(spans["hypothesis"], list)
+
+    def test_tier1_next_includes_tier1(self, auth_client_with_example: tuple[TestClient, dict, dict]):
+        """Test that /api/next includes tier1 in auto_spans."""
+        client, user, example = auth_client_with_example
+        response = client.get("/api/next")
+        assert response.status_code == 200
+        data = response.json()
+        assert "auto_spans" in data
+        assert "tier1" in data["auto_spans"]
+
+    def test_tier1_example_includes_tier1(self, auth_client_with_example: tuple[TestClient, dict, dict]):
+        """Test that /api/example/{id} includes tier1 in auto_spans."""
+        client, user, example = auth_client_with_example
+        response = client.get(f"/api/example/{example['id']}")
+        assert response.status_code == 200
+        data = response.json()
+        assert "auto_spans" in data
+        assert "tier1" in data["auto_spans"]

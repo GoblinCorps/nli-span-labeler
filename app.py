@@ -139,7 +139,36 @@ TIER0_WORDLISTS = {
 
 # Tier 1: Weak supervision labels (auto-generated, spot-checked)
 # Requires NLTK WordNet for semantic relations
-TIER1_LABELS = ["hypernym", "hyponym", "synonym", "antonym", "numeric_mismatch", "entity_alignment"]
+TIER1_LABELS = ["hypernym", "hyponym", "synonym", "antonym", "meronym", "holonym", "numeric_mismatch", "entity_alignment"]
+
+# WordNet initialization flag
+_wordnet_initialized = False
+
+def ensure_wordnet_data():
+    """Download WordNet data if not already present."""
+    global _wordnet_initialized
+    if _wordnet_initialized:
+        return True
+    try:
+        import nltk
+        from nltk.corpus import wordnet
+        # Test if data is available
+        wordnet.synsets("test")
+        _wordnet_initialized = True
+        return True
+    except LookupError:
+        try:
+            import nltk
+            nltk.download("wordnet", quiet=True)
+            nltk.download("omw-1.4", quiet=True)  # Open Multilingual WordNet
+            _wordnet_initialized = True
+            return True
+        except Exception as e:
+            print(f"Warning: Could not download WordNet data: {e}")
+            return False
+    except ImportError:
+        print("Warning: NLTK not installed, Tier 1 labels unavailable")
+        return False
 
 # Tier 1 configuration
 TIER1_QUALITY_SAMPLE_RATE = float(os.environ.get("TIER1_QUALITY_SAMPLE_RATE", "0.05"))  # 5% spot-check rate
@@ -446,6 +475,167 @@ def compute_tier0_labels(premise: str, hypothesis: str, premise_tokens: list[dic
     return result
 
 
+# ============================================================================
+# Tier 1: WordNet-based Semantic Relation Detection
+# ============================================================================
+
+def get_wordnet_relations(word: str) -> dict:
+    """
+    Get all WordNet semantic relations for a word.
+
+    Returns dict with sets of related words for each relation type.
+    """
+    relations = {
+        "hypernyms": set(),    # More general terms (dog -> animal)
+        "hyponyms": set(),     # More specific terms (animal -> dog)
+        "synonyms": set(),     # Same meaning (big -> large)
+        "antonyms": set(),     # Opposite meaning (hot -> cold)
+        "meronyms": set(),     # Part-of relations (car -> wheel)
+        "holonyms": set()      # Whole-of relations (wheel -> car)
+    }
+
+    if not ensure_wordnet_data():
+        return relations
+
+    try:
+        from nltk.corpus import wordnet
+
+        synsets = wordnet.synsets(word)
+        for synset in synsets:
+            # Synonyms: all lemmas in the synset
+            for lemma in synset.lemmas():
+                if lemma.name().lower() != word.lower():
+                    relations["synonyms"].add(lemma.name().lower().replace("_", " "))
+
+                # Antonyms: from lemma antonyms
+                for antonym in lemma.antonyms():
+                    relations["antonyms"].add(antonym.name().lower().replace("_", " "))
+
+            # Hypernyms: more general concepts
+            for hypernym in synset.hypernyms():
+                for lemma in hypernym.lemmas():
+                    relations["hypernyms"].add(lemma.name().lower().replace("_", " "))
+
+            # Hyponyms: more specific concepts
+            for hyponym in synset.hyponyms():
+                for lemma in hyponym.lemmas():
+                    relations["hyponyms"].add(lemma.name().lower().replace("_", " "))
+
+            # Meronyms: parts of this concept
+            for meronym in synset.part_meronyms() + synset.substance_meronyms() + synset.member_meronyms():
+                for lemma in meronym.lemmas():
+                    relations["meronyms"].add(lemma.name().lower().replace("_", " "))
+
+            # Holonyms: wholes that contain this concept
+            for holonym in synset.part_holonyms() + synset.substance_holonyms() + synset.member_holonyms():
+                for lemma in holonym.lemmas():
+                    relations["holonyms"].add(lemma.name().lower().replace("_", " "))
+
+    except Exception as e:
+        # Silently fail for individual words
+        pass
+
+    return relations
+
+
+def compute_tier1_labels(premise: str, hypothesis: str, premise_tokens: list[dict], hypothesis_tokens: list[dict]) -> dict:
+    """
+    Compute Tier 1 weak supervision labels using WordNet semantic relations.
+
+    Detects when tokens in hypothesis have semantic relations to premise tokens:
+    - hypernym: hypothesis token is more general than premise token
+    - hyponym: hypothesis token is more specific than premise token
+    - synonym: hypothesis token has same meaning as premise token
+    - antonym: hypothesis token has opposite meaning to premise token
+    - meronym: hypothesis token is a part of something in premise
+    - holonym: hypothesis token is a whole containing something in premise
+
+    Returns dict mapping label_name -> {premise: [indices], hypothesis: [indices]}
+    """
+    result = {
+        "hypernym": {"premise": [], "hypothesis": []},
+        "hyponym": {"premise": [], "hypothesis": []},
+        "synonym": {"premise": [], "hypothesis": []},
+        "antonym": {"premise": [], "hypothesis": []},
+        "meronym": {"premise": [], "hypothesis": []},
+        "holonym": {"premise": [], "hypothesis": []}
+    }
+
+    if not ensure_wordnet_data():
+        return result
+
+    # Get token texts
+    premise_texts = [t["text"].lower() for t in premise_tokens]
+    hypothesis_texts = [t["text"].lower() for t in hypothesis_tokens]
+
+    # Build WordNet relation maps for premise tokens
+    premise_relations = {}
+    for i, token in enumerate(premise_texts):
+        # Skip very short tokens and punctuation
+        if len(token) < 2 or not token.isalpha():
+            continue
+        premise_relations[i] = get_wordnet_relations(token)
+
+    # Check each hypothesis token against premise relations
+    for h_idx, h_token in enumerate(hypothesis_texts):
+        if len(h_token) < 2 or not h_token.isalpha():
+            continue
+
+        h_token_lower = h_token.lower()
+
+        for p_idx, p_relations in premise_relations.items():
+            p_token = premise_texts[p_idx]
+
+            # Skip if same token (already covered by Tier 0 alignment)
+            if h_token_lower == p_token:
+                continue
+
+            # Check if hypothesis token appears in premise token's relations
+            # hypernym: h is more general than p (p's hypernym contains h)
+            if h_token_lower in p_relations["hypernyms"]:
+                if p_idx not in result["hypernym"]["premise"]:
+                    result["hypernym"]["premise"].append(p_idx)
+                if h_idx not in result["hypernym"]["hypothesis"]:
+                    result["hypernym"]["hypothesis"].append(h_idx)
+
+            # hyponym: h is more specific than p (p's hyponym contains h)
+            if h_token_lower in p_relations["hyponyms"]:
+                if p_idx not in result["hyponym"]["premise"]:
+                    result["hyponym"]["premise"].append(p_idx)
+                if h_idx not in result["hyponym"]["hypothesis"]:
+                    result["hyponym"]["hypothesis"].append(h_idx)
+
+            # synonym: h has same meaning as p
+            if h_token_lower in p_relations["synonyms"]:
+                if p_idx not in result["synonym"]["premise"]:
+                    result["synonym"]["premise"].append(p_idx)
+                if h_idx not in result["synonym"]["hypothesis"]:
+                    result["synonym"]["hypothesis"].append(h_idx)
+
+            # antonym: h is opposite of p
+            if h_token_lower in p_relations["antonyms"]:
+                if p_idx not in result["antonym"]["premise"]:
+                    result["antonym"]["premise"].append(p_idx)
+                if h_idx not in result["antonym"]["hypothesis"]:
+                    result["antonym"]["hypothesis"].append(h_idx)
+
+            # meronym: h is a part of p (p's meronyms contains h)
+            if h_token_lower in p_relations["meronyms"]:
+                if p_idx not in result["meronym"]["premise"]:
+                    result["meronym"]["premise"].append(p_idx)
+                if h_idx not in result["meronym"]["hypothesis"]:
+                    result["meronym"]["hypothesis"].append(h_idx)
+
+            # holonym: h is a whole containing p (p's holonyms contains h)
+            if h_token_lower in p_relations["holonyms"]:
+                if p_idx not in result["holonym"]["premise"]:
+                    result["holonym"]["premise"].append(p_idx)
+                if h_idx not in result["holonym"]["hypothesis"]:
+                    result["holonym"]["hypothesis"].append(h_idx)
+
+    return result
+
+
 def store_auto_spans(conn, example_id: str, auto_labels: dict, tier: int = 0):
     """Store computed auto-spans in the database."""
     for label_name, sources in auto_labels.items():
@@ -481,22 +671,32 @@ def get_auto_spans(conn, example_id: str) -> dict:
 
 def ensure_auto_spans_computed(conn, example_id: str, premise: str, hypothesis: str) -> dict:
     """Ensure auto-spans are computed for an example, computing if needed."""
-    # Check if already computed
-    existing = conn.execute(
-        "SELECT example_id FROM auto_spans WHERE example_id = ? LIMIT 1",
+    # Check if already computed (check both tiers)
+    existing_tier0 = conn.execute(
+        "SELECT example_id FROM auto_spans WHERE example_id = ? AND tier = 0 LIMIT 1",
+        (example_id,)
+    ).fetchone()
+    existing_tier1 = conn.execute(
+        "SELECT example_id FROM auto_spans WHERE example_id = ? AND tier = 1 LIMIT 1",
         (example_id,)
     ).fetchone()
 
-    if existing:
-        return get_auto_spans(conn, example_id)
-
-    # Compute Tier 0 labels
+    # Tokenize once for both tiers
     premise_tokens = tokenize_text(premise)
     hypothesis_tokens = tokenize_text(hypothesis)
 
-    auto_labels = compute_tier0_labels(premise, hypothesis, premise_tokens, hypothesis_tokens)
-    store_auto_spans(conn, example_id, auto_labels, tier=0)
-    conn.commit()
+    # Compute Tier 0 if not cached
+    if not existing_tier0:
+        tier0_labels = compute_tier0_labels(premise, hypothesis, premise_tokens, hypothesis_tokens)
+        store_auto_spans(conn, example_id, tier0_labels, tier=0)
+
+    # Compute Tier 1 if not cached (WordNet semantic relations)
+    if not existing_tier1:
+        tier1_labels = compute_tier1_labels(premise, hypothesis, premise_tokens, hypothesis_tokens)
+        store_auto_spans(conn, example_id, tier1_labels, tier=1)
+
+    if not existing_tier0 or not existing_tier1:
+        conn.commit()
 
     return get_auto_spans(conn, example_id)
 
