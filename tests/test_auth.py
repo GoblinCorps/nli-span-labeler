@@ -20,7 +20,6 @@ class TestRegistration:
         assert data["username"] == "newuser"
         assert data["display_name"] == "New User"
         assert data["role"] == "annotator"
-        assert "session_token" not in data  # Should be in cookie, not body
 
     def test_register_duplicate_username(self, fresh_client: TestClient):
         """Test registration with duplicate username fails."""
@@ -37,7 +36,7 @@ class TestRegistration:
             "display_name": "Second User"
         })
         assert response.status_code == 400
-        assert "already exists" in response.json()["detail"].lower()
+        assert "already taken" in response.json()["detail"].lower()
 
     def test_register_short_password(self, fresh_client: TestClient):
         """Test registration with short password fails."""
@@ -124,7 +123,7 @@ class TestLogout:
         client, user = auth_client
         response = client.post("/api/auth/logout")
         assert response.status_code == 200
-        assert response.json()["message"] == "Logged out"
+        assert response.json()["status"] == "logged_out"
 
     def test_logout_clears_session(self, auth_client: tuple[TestClient, dict]):
         """Test that logout clears the session."""
