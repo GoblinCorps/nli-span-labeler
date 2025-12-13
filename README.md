@@ -139,16 +139,73 @@ Exported JSONL includes:
 
 ## API Endpoints
 
+### Authentication
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/auth/register` | POST | Register new user |
+| `/api/auth/login` | POST | Login with credentials |
+| `/api/auth/logout` | POST | Logout current session |
+| `/api/me` | GET | Get current user info |
+
+### Examples & Annotation
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/` | GET | Main labeling interface |
 | `/api/datasets` | GET | List available datasets |
-| `/api/next` | GET | Get next unlabeled example |
-| `/api/example/{dataset}/{id}` | GET | Get specific example |
-| `/api/annotate` | POST | Save labels and scores |
+| `/api/next` | GET | Get next unlabeled example (auto-locks) |
+| `/api/example/{id}` | GET | Get specific example by ID |
+| `/api/label` | POST | Save labels and complexity scores |
 | `/api/skip/{id}` | POST | Skip an example |
 | `/api/stats` | GET | Get labeling statistics |
-| `/api/export` | GET | Export all labels as JSONL |
+| `/api/labels` | GET | Get label schema (difficulty + NLI labels) |
+
+### Locking
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/lock/status/{id}` | GET | Check lock status |
+| `/api/lock/release/{id}` | POST | Release a lock |
+| `/api/lock/extend/{id}` | POST | Extend lock by 30 minutes |
+| `/api/lock/mine` | GET | List your current locks |
+
+### Admin (requires admin role)
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/admin/users` | GET | List all users |
+| `/api/admin/user/{id}/role` | PUT | Update user role |
+| `/api/admin/dashboard` | GET | Admin metrics dashboard |
+| `/api/admin/calibration` | GET | Calibration configuration |
+| `/api/export` | GET | Export all annotations as JSONL |
+
+### Agreement & Reliability
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/pools/stats` | GET | Get question pool statistics |
+| `/api/agreement/example/{id}` | GET | Get example agreement metrics |
+| `/api/agreement/annotator/{id}` | GET | Get annotator reliability |
+
+See `/docs` for interactive API documentation (Swagger UI).
+
+## Configuration
+
+Key environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ANONYMOUS_MODE` | `0` | Set to `1` for single-user mode (no auth) |
+| `ADMIN_USER` | - | Username to auto-grant admin role on registration |
+| `TOKENIZER_MODEL` | `answerdotai/ModernBERT-base` | HuggingFace model for tokenization |
+| `LOCK_TIMEOUT_MINUTES` | `30` | How long example locks persist |
+| `TRAINING_ENABLED` | `1` | Enable training mode for new users |
+
+## Testing
+
+```bash
+# Run all tests
+pytest tests/ -v
+
+# Run with coverage
+pytest tests/ -v --cov=app --cov-report=term-missing
+```
 
 ## Project Structure
 
@@ -157,10 +214,12 @@ nli-span-labeler/
 ├── app.py              # FastAPI application
 ├── run.sh              # Startup script
 ├── requirements.txt    # Python dependencies
+├── pytest.ini          # Pytest configuration
 ├── static/
 │   └── index.html      # Frontend (single-page app)
 ├── data/
 │   └── nli/            # JSONL data files
+├── tests/              # Pytest test suite
 ├── scripts/
 │   └── download_data.py
 └── labels.db           # SQLite database (created on first run)
