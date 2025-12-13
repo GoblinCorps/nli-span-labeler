@@ -1659,7 +1659,7 @@
                     <ul>
                         <li><code>GET /api/next</code> - Get the next unlabeled example</li>
                         <li><code>GET /api/example/{dataset}/{id}</code> - Get a specific example</li>
-                        <li><code>POST /api/annotate</code> - Submit annotations</li>
+                        <li><code>POST /api/label</code> - Submit annotations</li>
                         <li><code>GET /api/stats</code> - Get annotation statistics</li>
                         <li><code>GET /api/export</code> - Export all annotations as JSONL</li>
                     </ul>
@@ -3062,7 +3062,7 @@
             });
 
             try {
-                const resp = await authenticatedFetch('/api/annotate', {
+                const resp = await authenticatedFetch('/api/label', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
