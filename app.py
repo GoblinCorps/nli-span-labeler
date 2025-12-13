@@ -4103,8 +4103,15 @@ async def submit_annotation(
     """Submit labels and scores for an example."""
     user_id = user["id"]
     custom_labels_used = []
-    
+
     with get_db() as conn:
+        # Verify example exists
+        example = conn.execute(
+            "SELECT id FROM examples WHERE id = ?", (submission.example_id,)
+        ).fetchone()
+        if not example:
+            raise HTTPException(404, f"Example not found: {submission.example_id}")
+
         # Delete existing labels for this user+example
         conn.execute(
             "DELETE FROM labels WHERE example_id = ? AND annotator_id = ?",
@@ -4196,8 +4203,15 @@ async def skip_example(
 ):
     """Mark an example as skipped by the current user."""
     user_id = user["id"]
-    
+
     with get_db() as conn:
+        # Verify example exists
+        example = conn.execute(
+            "SELECT id FROM examples WHERE id = ?", (example_id,)
+        ).fetchone()
+        if not example:
+            raise HTTPException(404, f"Example not found: {example_id}")
+
         conn.execute("""
             INSERT OR REPLACE INTO skipped (example_id, annotator_id)
             VALUES (?, ?)
